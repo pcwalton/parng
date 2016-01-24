@@ -20,22 +20,21 @@ defilter_paeth_scanline:
     paddw xmm6,xmm1                             ; xmm6 = ±pc = a + b - 2*c
     pabsw xmm6,xmm6                             ; xmm6 = pc
     vpshufb xmm8,xmm3,paeth_shuffle_mask_pa_3   ; xmm8 = pa (16-bit)
-    vpminsw xmm9,xmm11,xmm6                     ; xmm9 = min(pb, pc)
-    paddw xmm9,paeth_one                        ; xmm9 = min(pb, pc) + 1
-    pcmpgtw xmm9,xmm8                           ; xmm9 = pa <= pb && pa <= pc
-    pshufb xmm9,xmm9,paeth_shuffle_mask_16_to_8 ; xmm9 = pa <= pb && pa <= pc (8-bit)
-    vpand xmm12,xmm9,xmm5                       ; xmm12 = a if pa <= pb && pa <= pc
-    vpaddw xmm10,xmm6,paeth_one                 ; xmm10 = pc + 1
-    pcmpgtw xmm10,xmm11                         ; xmm10 = pb <= pc
-    vpcmpgtw xmm11,xmm6,xmm11                   ; xmm11 = pc > pb = !(pc <= pb)
-    vpandn xmm14,xmm10,xmm9                     ; xmm14 = pb <= pc && !(pa <= pb && pa <= pc)
-    pandn xmm11,xmm9                            ; xmm11 = !(pb <= pc) && !(pa <= pb && pa <= pc)
-    pand xmm14,xmm5                             ; xmm14 = b if pb<=pc && !(pa<=pb && pa<=pc)
-    pand xmm15,xmm4                             ; xmm15 = c if !(pb<=pc) && !(pa<=pb && pa<=pc)
-    por xmm14,xmm15                             ; xmm14 = b or c
-    pshufb xmm14,xmm14,paeth_shuffle_mask_16_to_8
-                                                ; xmm14 = b or c (8-bit)
-    pand xmm12,xmm14                            ; xmm12 = a or b or c
+    vpminsw xmm9,xmm8,xmm11                     ; xmm9 = min(pa, pb)
+    pminsw xmm9,xmm6                            ; xmm9 = min(pa, pb, pc)
+    vpcmpeqw xmm10,xmm9,xmm8                    ; xmm10 = pa <= pb && pa <= pc
+    vpcmpeqw xmm12,xmm9,xmm11                   ; xmm12 = pb <= pa && pb <= pc
+    vpcmpeqw xmm13,xmm9,xmm6                    ; xmm13 = pc <= pa && pc <= pb
+    pandn xmm12,xmm10                           ; xmm12 = pb <= pc && pa > pb
+    pandn xmm13,xmm10
+    pandn xmm13,xmm12                           ; xmm13 = pc is lowest
+    pand xmm13,xmm7                             ; xmm13 = b if we should choose it
+    pand xmm14,xmm4                             ; xmm14 = c if we should choose it
+    por xmm13,xmm14                             ; xmm13 = b or c if we should choose one
+    pshufb xmm13,xmm13,paeth_shuffle_mask_16_to_8
+    pshufb xmm12,xmm12,paeth_shuffle_mask_16_to_8
+    pand xmm12,xmm5
+    por xmm12,xmm13
     pextrd edx,xmm12,0
     mov [dest],edx
 

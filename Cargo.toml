@@ -1,0 +1,11 @@
+[package]
+name = "parng"
+version = "0.1.0"
+
+[lib]
+name = "parng"
+path = "lib.rs"
+
+[dependencies.zlib-ng-sys]
+git = "https://github.com/pcwalton/zlib-ng-sys"
+

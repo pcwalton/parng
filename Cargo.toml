@@ -6,6 +6,16 @@ version = "0.1.0"
 name = "parng"
 path = "lib.rs"
 
+[dependencies]
+byteorder = "0.4"
+libc = "0.2"
+num = "0.1"
+rayon = "0.2"
+
 [dependencies.zlib-ng-sys]
 git = "https://github.com/pcwalton/zlib-ng-sys"
+
+[[example]]
+name = "example"
+path = "example.rs"
 

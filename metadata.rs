@@ -1,8 +1,32 @@
 //! Metadata for PNG images.
 //!
-//! This is directly taken from the `immeta` library:
-//!
-//!     https://github.com/netvl/immeta
+//! This code is derived from code in the `immeta` library: https://github.com/netvl/immeta
+
+use PngError;
+use byteorder::{self, ReadBytesExt, BigEndian};
+use num::ToPrimitive;
+use std::io::BufRead;
+
+/// Represents image dimensions in pixels.
+///
+/// It is possible to convert pairs of type `(T1, T2)`, where `T1` and `T2` are primitive
+/// number types, to this type, however, this is mostly needed for internal usage.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct Dimensions {
+    /// Image width in pixels.
+    pub width: u32,
+    /// Image height in pixels.
+    pub height: u32,
+}
+
+impl<T: ToPrimitive, U: ToPrimitive> From<(T, U)> for Dimensions {
+    fn from((w, h): (T, U)) -> Dimensions {
+        Dimensions {
+            width: w.to_u32().unwrap(),
+            height: h.to_u32().unwrap()
+        }
+    }
+}
 
 /// Color type used in an image.
 ///
@@ -120,6 +144,30 @@ impl InterlaceMethod {
     }
 }
 
+/// Represents a PNG chunk.
+#[derive(Clone, Eq, PartialEq, Debug)]
+pub struct ChunkHeader {
+    pub length: u32,
+    pub chunk_type: [u8; 4],
+}
+
+impl ChunkHeader {
+    pub fn load<R: ?Sized + BufRead>(reader: &mut R) -> Result<ChunkHeader,PngError> {
+        // chunk length
+        let length = try!(reader.read_u32::<BigEndian>()
+                                .map_byteorder_error("when reading chunk length"));
+        
+        let mut chunk_type = [0u8; 4];
+        try!(reader.read_exact(&mut chunk_type)
+                   .map_err(|_| format_eof("when reading chunk type")));
+
+        Ok(ChunkHeader {
+            length: length,
+            chunk_type: chunk_type,
+        })
+    }
+}
+
 /// Represents metadata of a PNG image.
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct Metadata {
@@ -136,3 +184,78 @@ pub struct Metadata {
     /// Transmission order used in the image.
     pub interlace_method: InterlaceMethod
 }
+
+impl Metadata {
+    pub fn load<R: ?Sized + BufRead>(r: &mut R) -> Result<Metadata,PngError> {
+        let mut signature = [0u8; 8];
+        try!(r.read_exact(&mut signature).map_err(|_| format_eof("when reading PNG signature")));
+
+        if &signature != b"\x89PNG\r\n\x1a\n" {
+            return Err(PngError::InvalidMetadata(format!("invalid PNG header: {:?}", signature)));
+        }
+
+        // chunk length
+        let chunk_header = try!(ChunkHeader::load(r));
+        if &chunk_header.chunk_type != b"IHDR" {
+            return Err(PngError::InvalidMetadata(format!("invalid PNG chunk: {:?}",
+                                                         chunk_header.chunk_type)));
+        }
+
+        let width = try!(r.read_u32::<BigEndian>().map_byteorder_error("when reading width"));
+        let height = try!(r.read_u32::<BigEndian>().map_byteorder_error("when reading height"));
+        let bit_depth = try!(r.read_u8().map_byteorder_error("when reading bit depth"));
+        let color_type = try!(r.read_u8().map_byteorder_error("when reading color type"));
+        let compression_method =
+            try!(r.read_u8().map_byteorder_error("when reading compression method"));
+        let filter_method = try!(r.read_u8().map_byteorder_error("when reading filter method"));
+        let interlace_method =
+            try!(r.read_u8().map_byteorder_error("when reading interlace method"));
+
+        drop(try!(r.read_u32::<BigEndian>().map_byteorder_error("when reading metadata CRC")));
+
+        Ok(Metadata {
+            dimensions: (width, height).into(),
+            color_type: try!(
+                ColorType::from_u8(color_type).ok_or(
+                    PngError::InvalidMetadata(format!("invalid color type: {}", color_type)))
+            ),
+            color_depth: try!(
+                compute_color_depth(bit_depth, color_type).ok_or(
+                    PngError::InvalidMetadata(format!("invalid bit depth: {}", bit_depth)))
+            ),
+            compression_method: try!(
+                CompressionMethod::from_u8(compression_method).ok_or(PngError::InvalidMetadata(
+                        format!("invalid compression method: {}", compression_method)))
+            ),
+            filter_method: try!(
+                FilterMethod::from_u8(filter_method).ok_or(PngError::InvalidMetadata(
+                        format!("invalid filter method: {}", filter_method)))
+            ),
+            interlace_method: try!(
+                InterlaceMethod::from_u8(interlace_method).ok_or(PngError::InvalidMetadata(
+                        format!("invalid interlace method: {}", interlace_method)))
+            )
+        })
+    }
+}
+
+trait MapByteOrderError {
+    type OkType;
+    fn map_byteorder_error(self, description: &'static str) -> Result<Self::OkType,PngError>;
+}
+
+impl<T> MapByteOrderError for byteorder::Result<T> {
+    type OkType = T;
+    fn map_byteorder_error(self, description: &'static str) -> Result<Self::OkType,PngError> {
+        match self {
+            Err(byteorder::Error::Io(io_error)) => Err(PngError::Io(io_error)),
+            Err(byteorder::Error::UnexpectedEOF) => Err(format_eof(description)),
+            Ok(value) => Ok(value),
+        }
+    }
+}
+
+fn format_eof(description: &'static str) -> PngError {
+    PngError::InvalidMetadata(format!("unexpected end of file {}", description))
+}
+

@@ -8,7 +8,6 @@ extern crate zlib_ng_sys;
 
 use libc::c_int;
 use metadata::{ChunkHeader, Metadata};
-use std::cmp;
 use std::io::{self, BufRead, Seek, SeekFrom};
 use zlib_ng_sys::{Z_ERRNO, Z_NO_FLUSH, Z_OK, z_stream};
 
@@ -16,123 +15,123 @@ const BUFFER_SIZE: u32 = 16384;
 
 pub mod metadata;
 
-pub struct Image<R> {
-    reader: R,
+pub struct Image {
     metadata: Option<Metadata>,
-    z_stream: Option<z_stream>,
+    z_stream: z_stream,
     buffered_compressed_data: Vec<u8>,
     buffered_scanline_predictors: Vec<Predictor>,
     buffered_scanline_data: Vec<u8>,
     decode_state: DecodeState,
 }
 
-impl<R> Drop for Image<R> {
+impl Drop for Image {
     fn drop(&mut self) {
         unsafe {
-            if let Some(ref mut z_stream) = self.z_stream {
-                drop(zlib_ng_sys::deflateEnd(z_stream))
-            }
+            drop(zlib_ng_sys::deflateEnd(&mut self.z_stream))
         }
     }
 }
 
-impl<R> Image<R> where R: BufRead + Seek {
-    pub fn new(reader: R) -> Image<R> {
-        Image {
-            reader: reader,
+impl Image {
+    pub fn new() -> Result<Image,PngError> {
+        let mut z_stream = z_stream::default();
+        unsafe {
+            try!(PngError::from_zlib_result(zlib_ng_sys::inflateInit(&mut z_stream)));
+        }
+        Ok(Image {
             metadata: None,
-            z_stream: None,
+            z_stream: z_stream,
             buffered_compressed_data: vec![],
             buffered_scanline_predictors: vec![],
             buffered_scanline_data: vec![],
             decode_state: DecodeState::Start,
-        }
+        })
     }
 
-    pub fn load_metadata(&mut self) -> Result<(),PngError> {
-        if self.decode_state != DecodeState::Start {
-            return Err(PngError::InvalidOperation("Metadata has already been loaded!"))
-        }
-        self.metadata = Some(try!(Metadata::load(&mut self.reader)));
-        self.decode_state = DecodeState::MetadataLoaded;
-        Ok(())
-    }
-
-    pub fn start_decoding(&mut self) -> Result<(),PngError> {
-        match self.decode_state {
-            DecodeState::Start => {
-                return Err(PngError::InvalidOperation("Call `load_metadata()` before \
-                                                      `start_decoding()`!"))
-            }
-            DecodeState::DecodingData(_) => {
-                return Err(PngError::InvalidOperation("Decoding has already begun!"))
-            }
-            DecodeState::MetadataLoaded => {}
-        }
-
-        let mut chunk_length;
+    pub fn add_data<R>(&mut self, reader: &mut R) -> Result<AddDataResult,PngError>
+                       where R: BufRead + Seek {
         loop {
-            let chunk_header = try!(ChunkHeader::load(&mut self.reader));
-            chunk_length = chunk_header.length;
-            if &chunk_header.chunk_type == b"IDAT" {
-                break
+            let initial_pos = try!(reader.seek(SeekFrom::Current(0)).map_err(PngError::Io));
+            match self.decode_state {
+                DecodeState::Start => {
+                    match Metadata::load(reader) {
+                        Ok(metadata) => {
+                            self.metadata = Some(metadata);
+                            self.decode_state = DecodeState::LookingForImageData
+                        }
+                        Err(PngError::NeedMoreData) => {
+                            try!(reader.seek(SeekFrom::Start(initial_pos)).map_err(PngError::Io));
+                            return Ok(AddDataResult::Continue)
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                DecodeState::LookingForImageData => {
+                    let chunk_header = match ChunkHeader::load(reader) {
+                        Err(PngError::NeedMoreData) => {
+                            try!(reader.seek(SeekFrom::Start(initial_pos)).map_err(PngError::Io));
+                            return Ok(AddDataResult::Continue)
+                        }
+                        Err(error) => return Err(error),
+                        Ok(chunk_header) => chunk_header,
+                    };
+                    if &chunk_header.chunk_type == b"IDAT" {
+                        self.decode_state = DecodeState::DecodingData(chunk_header.length);
+                    } else if &chunk_header.chunk_type == b"IEND" {
+                        self.decode_state = DecodeState::Finished
+                    } else {
+                        // Skip over this chunk, adding 4 to move past the CRC.
+                        try!(reader.seek(SeekFrom::Current((chunk_header.length as i64) + 4))
+                                   .map_err(PngError::Io));
+                    }
+                }
+                DecodeState::DecodingData(bytes_left_in_chunk) => {
+                    let mut byte_count = bytes_left_in_chunk;
+                    if self.buffered_compressed_data.len() < (byte_count as usize) {
+                        self.buffered_compressed_data.resize(byte_count as usize, 0)
+                    }
+
+                    {
+                        let mut buffered_compressed_data =
+                            &mut self.buffered_compressed_data[0..(byte_count as usize)];
+                        match reader.read(&mut buffered_compressed_data) {
+                            Ok(0) => {
+                                try!(reader.seek(SeekFrom::Start(initial_pos))
+                                           .map_err(PngError::Io));
+                                return Ok(AddDataResult::Continue)
+                            }
+                            Ok(bytes_read) => byte_count = bytes_read as u32,
+                            Err(error) => return Err(PngError::Io(error)),
+                        }
+                    }
+
+                    unsafe {
+                        self.z_stream.avail_in = byte_count as u32;
+                        self.z_stream.next_in = &self.buffered_compressed_data[0];
+                        while self.z_stream.avail_in != 0 {
+                            let old_buffered_scanline_data_length =
+                                self.buffered_scanline_data.len();
+                            self.buffered_scanline_data.resize(
+                                old_buffered_scanline_data_length + (BUFFER_SIZE as usize), 0);
+                            self.z_stream.avail_out = BUFFER_SIZE;
+                            self.z_stream.next_out = &mut self.buffered_scanline_data[
+                                old_buffered_scanline_data_length] as *mut u8;
+                            try!(PngError::from_zlib_result(zlib_ng_sys::inflate(
+                                        &mut self.z_stream,
+                                        Z_NO_FLUSH)));
+                        }
+                    }
+
+                    let bytes_left_in_chunk_after_read = bytes_left_in_chunk - byte_count;
+                    self.decode_state = if bytes_left_in_chunk_after_read == 0 {
+                        DecodeState::LookingForImageData
+                    } else {
+                        DecodeState::DecodingData(bytes_left_in_chunk_after_read)
+                    }
+                }
+                DecodeState::Finished => return Ok(AddDataResult::Finished),
             }
-
-            // Add 4 to skip over the CRC of this chunk.
-            //
-            // FIXME(pcwalton): We should have some "need more data" error return mechanism.
-            try!(self.reader
-                     .seek(SeekFrom::Current((chunk_header.length as i64) + 4))
-                     .map_err(PngError::Io));
         }
-
-        unsafe {
-            debug_assert!(self.z_stream.is_none());
-            self.z_stream = Some(z_stream::default());
-            let mut z_stream = self.z_stream.as_mut().unwrap();
-            try!(PngError::from_zlib_result(zlib_ng_sys::inflateInit(z_stream)));
-        }
-
-        self.decode_state = DecodeState::DecodingData(chunk_length);
-        Ok(())
-    }
-
-    pub fn buffer_data(&mut self, mut byte_count: u32) -> Result<(),PngError> {
-        let bytes_left_in_chunk = match self.decode_state {
-            DecodeState::Start | DecodeState::MetadataLoaded => {
-                return Err(PngError::InvalidOperation("Call `load_metadata()` and \
-                                                       `start_decoding()` before \
-                                                       `buffer_data()`!"))
-            }
-            DecodeState::DecodingData(bytes_left_in_chunk) => bytes_left_in_chunk,
-        };
-        byte_count = cmp::min(byte_count, bytes_left_in_chunk);
-
-        if self.buffered_compressed_data.len() < (byte_count as usize) {
-            self.buffered_compressed_data.resize(byte_count as usize, 0)
-        }
-        try!(self.reader
-                 .read_exact(&mut self.buffered_compressed_data[0..(byte_count as usize)])
-                 .map_err(PngError::Io));
-
-        unsafe {
-            debug_assert!(self.z_stream.is_some());
-            let mut z_stream = self.z_stream.as_mut().unwrap();
-            z_stream.avail_in = byte_count as u32;
-            z_stream.next_in = &self.buffered_compressed_data[0];
-            while z_stream.avail_in != 0 {
-                let old_buffered_scanline_data_length = self.buffered_scanline_data.len();
-                self.buffered_scanline_data
-                    .resize(old_buffered_scanline_data_length + (BUFFER_SIZE as usize), 0);
-                z_stream.avail_out = BUFFER_SIZE;
-                z_stream.next_out =
-                    &mut self.buffered_scanline_data[old_buffered_scanline_data_length] as *mut u8;
-                try!(PngError::from_zlib_result(zlib_ng_sys::inflate(z_stream, Z_NO_FLUSH)));
-            }
-        }
-
-        self.decode_state = DecodeState::DecodingData(bytes_left_in_chunk - byte_count);
-        Ok(())
     }
 
     pub fn decode(&mut self, result: &mut Vec<u8>) {
@@ -162,7 +161,7 @@ impl<R> Image<R> where R: BufRead + Seek {
                 return
             }
 
-            let mut scanlines_in_sequential_group: u32 = 0;
+            let mut scanlines_in_sequential_group: u32 = 1;
             while (scanlines_in_sequential_group as usize) < predictors.len() {
                 match predictors[scanlines_in_sequential_group as usize] {
                     Predictor::None | Predictor::Left => break,
@@ -176,7 +175,6 @@ impl<R> Image<R> where R: BufRead + Seek {
             let (head_output, tail_output) = output.split_at_mut(sequential_group_byte_length);
             rayon::join(|| {
                 for scanline in 0..scanlines_in_sequential_group {
-                    let predictor = predictors[scanline as usize];
                     // TODO(pcwalton): Predict!
                 }
             }, || {
@@ -192,6 +190,7 @@ impl<R> Image<R> where R: BufRead + Seek {
 
 #[derive(Debug)]
 pub enum PngError {
+    NeedMoreData,
     Io(io::Error),
     InvalidMetadata(String),
     InvalidOperation(&'static str),
@@ -210,10 +209,17 @@ impl PngError {
 }
 
 #[derive(Copy, Clone, PartialEq)]
-pub enum DecodeState {
+pub enum AddDataResult {
+    Continue,
+    Finished,
+}
+
+#[derive(Copy, Clone, PartialEq)]
+enum DecodeState {
     Start,
-    MetadataLoaded,
+    LookingForImageData,
     DecodingData(u32),
+    Finished,
 }
 
 #[derive(Copy, Clone, PartialEq)]
@@ -224,5 +230,13 @@ enum Predictor {
     Up = 2,
     Average = 3,
     Paeth = 4,
+}
+
+#[link(name="parngpredict")]
+extern {
+    fn parng_predict_scanline_left(this: *mut u8, prev: *const u8, width: u64);
+    fn parng_predict_scanline_up(this: *mut u8, prev: *const u8, width: u64);
+    fn parng_predict_scanline_average(this: *mut u8, prev: *const u8, width: u64);
+    fn parng_predict_scanline_paeth(this: *mut u8, prev: *const u8, width: u64);
 }
 

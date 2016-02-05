@@ -19,7 +19,7 @@ parng_predict_scanline_left:
     paddb xmm0,xmm1                             ; xmm0 = [ b+d,       a+c+z,   b,     a+z       ]
     vpslldq xmm1,xmm0,4                         ; xmm1 = [ a+c+z,     b,       a+e,   0         ]
     paddb xmm0,xmm1                             ; xmm0 = [ a+b+c+d+z, a+b+c+z, a+b+e, a+z       ]
-    movdqu [rdi+rax*4]                          ; write result
+    movdqu [rdi+rax*4],xmm0                     ; write result
     vpsrldq xmm0,12                             ; xmm0 = [ 0,         0,       0,     a+b+c+d+z ]
     add rax,4
     cmp rax,rdx
@@ -56,14 +56,14 @@ parng_predict_scanline_average:
 ; https://github.com/kobalicek/simdtests/blob/master/depng/depng_sse2.cpp
 parng_predict_scanline_paeth:
     mov rax,0x5580558055805580
-    movd xmm0,rax
+    movq xmm0,rax
     xorps xmm1,xmm1                             ; xmm1 = a = 0
     xorps xmm3,xmm3                             ; xmm3 = c = 0
     xor rax,rax
 .loop:
     pmovzxbw xmm2,[rsi+rax*4]                   ; xmm2 = b
-    vpminw xmm4,xmm1,xmm2                       ; xmm4 = min(a, b)
-    vpmaxw xmm5,xmm1,xmm2                       ; xmm5 = max(a, b)
+    vpminsw xmm4,xmm1,xmm2                      ; xmm4 = min(a, b)
+    vpmaxsw xmm5,xmm1,xmm2                      ; xmm5 = max(a, b)
     vpsubw xmm6,xmm5,xmm4                       ; xmm6 = |a - b|
     pmulhw xmm6,xmm0                            ; xmm6 = |a - b|/3
     psubw xmm4,xmm3                             ; xmm4 = min(a, b) - c

@@ -8,15 +8,20 @@ global parng_predict_scanline_up
 global parng_predict_scanline_average
 global parng_predict_scanline_paeth
 
+%ifidn __OUTPUT_FORMAT__,win64
+    %define this_line rcx
+    %define prev_line rdx
+    %define width r8
+%else
+    %define this_line rdi
+    %define prev_line rsi
+    %define width rdx
+%endif
+
+section .text
+
 ; parng_predict_scanline_none(uint8x4 *this, uint8x4 *prev, uint64_t width)
 parng_predict_scanline_none:
-    xor rax,rax
-.loop:
-    movdqu xmm0,[rdi+rax*4]
-    movdqu [rsi+rax*4],xmm0
-    add rax,4
-    cmp rax,rdx
-    jb .loop
     ret
 
 ; parng_predict_scanline_left(uint8x4 *this, uint8x4 *prev, uint64_t width)
@@ -26,15 +31,15 @@ parng_predict_scanline_left:
     xorps xmm0,xmm0
     xor rax,rax
 .loop:
-    paddb xmm0,[rdi+rax*4]                      ; xmm0 = [ d,         c,       b,     a+z       ]
+    paddb xmm0,[this_line+rax*4]                ; xmm0 = [ d,         c,       b,     a+z       ]
     vpslldq xmm1,xmm0,8                         ; xmm1 = [ b,         a,       0,     0         ]
     paddb xmm0,xmm1                             ; xmm0 = [ b+d,       a+c+z,   b,     a+z       ]
     vpslldq xmm1,xmm0,4                         ; xmm1 = [ a+c+z,     b,       a+e,   0         ]
     paddb xmm0,xmm1                             ; xmm0 = [ a+b+c+d+z, a+b+c+z, a+b+e, a+z       ]
-    movdqu [rdi+rax*4],xmm0                     ; write result
+    movdqu [this_line+rax*4],xmm0               ; write result
     vpsrldq xmm0,12                             ; xmm0 = [ 0,         0,       0,     a+b+c+d+z ]
     add rax,4
-    cmp rax,rdx
+    cmp rax,width
     jb .loop
     ret
 
@@ -42,11 +47,11 @@ parng_predict_scanline_left:
 parng_predict_scanline_up:
     xor rax,rax
 .loop:
-    movdqu xmm0,[rsi+rax*4]                     ; xmm0 = prev
-    paddb xmm0,[rdi+rax*4]                      ; xmm0 = prev + this
-    movdqu [rdi+rdx*4],xmm0                     ; write result
+    movdqu xmm0,[prev_line+rax*4]               ; xmm0 = prev
+    paddb xmm0,[this_line+rax*4]                ; xmm0 = prev + this
+    movdqu [this_line+width*4],xmm0             ; write result
     add rax,4
-    cmp rax,rdx
+    cmp rax,width
     jb .loop
     ret
 
@@ -60,13 +65,13 @@ parng_predict_scanline_average:
     xorps xmm0,xmm0                             ; xmm0 = a
     xor rax,rax
 .loop:
-    movd xmm1,[rsi+rax*4]                       ; xmm1 = b
+    movd xmm1,[prev_line+rax*4]                 ; xmm1 = b
     pavgb xmm0,xmm1                             ; xmm0 = avg(a, b)
-    movd xmm1,[rdi+rax*4]                       ; xmm1 = a
+    movd xmm1,[this_line+rax*4]                 ; xmm1 = a
     paddb xmm0,xmm1                             ; xmm0 = this + avg(a, b)
-    movd [rdi+rax*4],xmm0                       ; write this
+    movd [this_line+rax*4],xmm0                 ; write this
     inc rax
-    cmp rax,rdx
+    cmp rax,width
     jb .loop
     ret
 
@@ -90,7 +95,7 @@ parng_predict_scanline_paeth:
     xorps xmm2,xmm2             ; xmm2 = c = 0
     xor rax,rax
 .loop:
-    pmovzxbw xmm1,[rsi+rax*4]   ; xmm1 = b
+    pmovzxbw xmm1,[prev_line+rax*4]   ; xmm1 = b
     vpsubw xmm4,xmm2,xmm1       ; xmm4 = c - b = ±pa
     vpsubw xmm5,xmm0,xmm2       ; xmm5 = a - c = ±pb
     vpsubw xmm6,xmm5,xmm4       ; xmm6 = a - c - c + b = a + b - 2c = ±pc
@@ -106,13 +111,13 @@ parng_predict_scanline_paeth:
     por xmm8,xmm4               ; xmm8 = ¬(pa ≤ pc) ∧ ¬(pb ≤ pc) ? TRUE : pa ≤ pb ? a : b
     pand xmm7,xmm2              ; xmm7 = ¬(pa ≤ pc) ∧ ¬(pb ≤ pc) ? c : ¬(pa ≤ pb) ? undef : FALSE
     pmaxsw xmm8,xmm7            ; xmm8 = ¬(pa≤pc) ∧ ¬(pb≤pc) ? c : (pa≤pb) ∧ (pa≤pc) ? a : b
-    pmovzxbw xmm0,[rdi+rax*4]   ; xmm0 = next a = this pixel
+    pmovzxbw xmm0,[this_line+rax*4]
     paddw xmm0,xmm8             ; xmm0 = next a = output pixel
     vpackuswb xmm3,xmm0,xmm0    ; xmm3 = output pixel (8-bit)
-    movd [rdi+rax*4],xmm3       ; write output pixel
+    movd [this_line+rax*4],xmm3 ; write output pixel
     movdqa xmm2,xmm1            ; c = b
     inc rax
-    cmp rax,rdx
+    cmp rax,width
     jb .loop
     ret
 

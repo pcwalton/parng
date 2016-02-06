@@ -94,16 +94,16 @@ parng_predict_scanline_paeth:
     pabsw xmm5,xmm5             ; xmm5 = pb
     pabsw xmm6,xmm6             ; xmm6 = pc
     vpminuw xmm7,xmm4,xmm5      ; xmm7 = min(pa, pb)
-    vpcmpgtw xmm8,xmm4,xmm5     ; xmm8 = pa > pb = ¬(pa ≤ pb)
-    vpandn xmm9,xmm8,xmm0       ; xmm9 = a if pa ≤ pb
-    vpcmpgtw xmm10,xmm7,xmm6    ; xmm10 = min(pa, pb) > pc = ¬(pa ≤ pc) ∧ ¬(pb ≤ pc)
-    pand xmm8,xmm1              ; xmm8 = b if ¬(pa ≤ pb)
-    por xmm8,xmm10              ; xmm10 = ¬(pa ≤ pc) ∧ ¬(pb ≤ pc) ? TRUE : ¬(pa ≤ pb) ? b : FALSE
-    por xmm9,xmm8               ; xmm9 = ¬(pa ≤ pc) ∧ ¬(pb ≤ pc) ? TRUE : pa ≤ pb ? a : b
-    pand xmm10,xmm2             ; xmm10 = ¬(pa ≤ pc) ∧ ¬(pb ≤ pc) ? c : ¬(pa ≤ pb) ? undef : FALSE
-    pmaxsw xmm9,xmm10           ; xmm9 = ¬(pa≤pc) ∧ ¬(pb≤pc) ? c : (pa≤pb) ∧ (pa≤pc) ? a : b
+    pcmpgtw xmm4,xmm5           ; xmm4 = pa > pb = ¬(pa ≤ pb)
+    vpandn xmm8,xmm4,xmm0       ; xmm8 = a if pa ≤ pb
+    pcmpgtw xmm7,xmm6           ; xmm7 = min(pa, pb) > pc = ¬(pa ≤ pc) ∧ ¬(pb ≤ pc)
+    pand xmm4,xmm1              ; xmm4 = b if ¬(pa ≤ pb)
+    por xmm4,xmm7               ; xmm7 = ¬(pa ≤ pc) ∧ ¬(pb ≤ pc) ? TRUE : ¬(pa ≤ pb) ? b : FALSE
+    por xmm8,xmm4               ; xmm8 = ¬(pa ≤ pc) ∧ ¬(pb ≤ pc) ? TRUE : pa ≤ pb ? a : b
+    pand xmm7,xmm2              ; xmm7 = ¬(pa ≤ pc) ∧ ¬(pb ≤ pc) ? c : ¬(pa ≤ pb) ? undef : FALSE
+    pmaxsw xmm8,xmm7            ; xmm8 = ¬(pa≤pc) ∧ ¬(pb≤pc) ? c : (pa≤pb) ∧ (pa≤pc) ? a : b
     pmovzxbw xmm0,[rdi+rax*4]   ; xmm0 = next a = this pixel
-    paddw xmm0,xmm9             ; xmm0 = next a = output pixel
+    paddw xmm0,xmm8             ; xmm0 = next a = output pixel
     vpackuswb xmm3,xmm0,xmm0    ; xmm3 = output pixel (8-bit)
     movd [rdi+rax*4],xmm3       ; write output pixel
     movdqa xmm2,xmm1            ; c = b

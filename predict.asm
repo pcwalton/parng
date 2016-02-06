@@ -42,8 +42,8 @@ parng_predict_scanline_left:
 parng_predict_scanline_up:
     xor rax,rax
 .loop:
-    movdqu xmm0,[rdi+rax*4]                     ; xmm0 = this
-    paddb xmm0,[rsi+rax*4]
+    movdqu xmm0,[rsi+rax*4]                     ; xmm0 = prev
+    paddb xmm0,[rdi+rax*4]                      ; xmm0 = prev + this
     movdqu [rdi+rdx*4],xmm0                     ; write result
     add rax,4
     cmp rax,rdx
@@ -58,8 +58,8 @@ parng_predict_scanline_average:
     xorps xmm0,xmm0                             ; xmm0 = a
     xor rax,rax
 .loop:
-    vpavgb xmm1,xmm0,[rsi+rax*4]                ; xmm1 = avg(a, b)
-    vpaddb xmm0,xmm1,[rdi+rax*4]                ; xmm0 = this + avg(a, b)
+    pavgb xmm0,[rsi+rax*4]                      ; xmm0 = avg(a, b)
+    paddb xmm0,[rdi+rax*4]                      ; xmm0 = this + avg(a, b)
     movd [rdi+rax*4],xmm0                       ; write this
     inc rax
     cmp rax,rdx

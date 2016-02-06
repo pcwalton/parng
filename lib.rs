@@ -175,6 +175,15 @@ impl Image {
             let (head_output, tail_output) = output.split_at_mut(sequential_group_byte_length);
             rayon::join(|| {
                 for scanline in 0..scanlines_in_sequential_group {
+                    let decode_scanline = match predictors[scanline] {
+                        Predictor::None => parng_predict_scanline_none,
+                        Predictor::Left => parng_predict_scanline_left,
+                        Predictor::Up => parng_predict_scanline_up,
+                        Predictor::Average => parng_predict_scanline_average,
+                        Predictor::Paeth => parng_predict_scanline_paeth,
+                    }
+                    unsafe {
+                    }
                     // TODO(pcwalton): Predict!
                 }
             }, || {
@@ -234,6 +243,7 @@ enum Predictor {
 
 #[link(name="parngpredict")]
 extern {
+    fn parng_predict_scanline_none(this: *mut u8, prev: *const u8, width: u64);
     fn parng_predict_scanline_left(this: *mut u8, prev: *const u8, width: u64);
     fn parng_predict_scanline_up(this: *mut u8, prev: *const u8, width: u64);
     fn parng_predict_scanline_average(this: *mut u8, prev: *const u8, width: u64);

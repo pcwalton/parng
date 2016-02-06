@@ -107,7 +107,7 @@ parng_predict_scanline_paeth:
     vpackuswb xmm3,xmm0,xmm0    ; xmm3 = output pixel (8-bit)
     movd [rdi+rax*4],xmm3       ; write output pixel
     movdqa xmm2,xmm1            ; c = b
-    add rax,4
+    inc rax
     cmp rax,rdx
     jb .loop
     ret

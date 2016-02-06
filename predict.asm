@@ -54,12 +54,16 @@ parng_predict_scanline_up:
 ;
 ; This is sequential across pixels since there's really no way to eliminate the data dependency
 ; that I can see. STOKE couldn't find a way either.
+;
+; FIXME(pcwalton): This is really inefficient. Optimize this.
 parng_predict_scanline_average:
     xorps xmm0,xmm0                             ; xmm0 = a
     xor rax,rax
 .loop:
-    pavgb xmm0,[rsi+rax*4]                      ; xmm0 = avg(a, b)
-    paddb xmm0,[rdi+rax*4]                      ; xmm0 = this + avg(a, b)
+    movd xmm1,[rsi+rax*4]                       ; xmm1 = b
+    pavgb xmm0,xmm1                             ; xmm0 = avg(a, b)
+    movd xmm1,[rdi+rax*4]                       ; xmm1 = a
+    paddb xmm0,xmm1                             ; xmm0 = this + avg(a, b)
     movd [rdi+rax*4],xmm0                       ; write this
     inc rax
     cmp rax,rdx

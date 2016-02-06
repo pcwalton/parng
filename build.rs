@@ -11,11 +11,12 @@ fn main() {
 
     let predict_o = format!("{}/predict.o", out_dir);
     Command::new(&format!("nasm")).arg("-f").arg("macho64")
-                                  .arg("-o").arg(predict_o)
+                                  .arg("--prefix").arg("_")
+                                  .arg("-o").arg(&predict_o)
                                   .arg("predict.asm")
                                   .status()
                                   .unwrap();
 
-    Config::new().object("predict.o").compile("libparngpredict.a")
+    Config::new().object(&predict_o).compile("libparngpredict.a")
 }
 

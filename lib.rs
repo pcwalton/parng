@@ -8,10 +8,13 @@ extern crate num;
 use libc::c_int;
 use libz_sys::{Z_ERRNO, Z_NO_FLUSH, Z_OK, Z_STREAM_END, z_stream};
 use metadata::{ChunkHeader, Metadata};
+use std::cmp;
 use std::io::{self, BufRead, Seek, SeekFrom};
 use std::mem;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
+
+const BUFFER_SIZE: usize = 16384;
 
 pub mod metadata;
 
@@ -19,9 +22,9 @@ pub struct Image {
     metadata: Option<Metadata>,
     z_stream: z_stream,
     compressed_data_buffer: Vec<u8>,
-    predictor_buffer: u8,
+    compressed_data_consumed: usize,
     scanline_data_buffer: Vec<u8>,
-    scanline_data_buffer_full: bool,
+    scanline_data_buffer_size: usize,
     decode_state: DecodeState,
     predictor_thread_comm: Option<MainThreadToPredictorThreadComm>,
 }
@@ -45,9 +48,9 @@ impl Image {
             metadata: None,
             z_stream: z_stream,
             compressed_data_buffer: vec![],
-            predictor_buffer: 0,
+            compressed_data_consumed: 0,
             scanline_data_buffer: vec![],
-            scanline_data_buffer_full: false,
+            scanline_data_buffer_size: 0,
             decode_state: DecodeState::Start,
             predictor_thread_comm: None,
         })
@@ -92,81 +95,62 @@ impl Image {
                     }
                 }
                 DecodeState::DecodingData(bytes_left_in_chunk) => {
-                    if self.scanline_data_buffer_full {
-                        println!("buffer full!");
+                    let stride = self.stride();
+                    if self.scanline_data_buffer_size == 1 + stride as usize {
                         return Ok(AddDataResult::BufferFull)
                     }
 
-                    let original_compressed_data_buffer_length =
-                        self.compressed_data_buffer.len() as u32;
-                    self.compressed_data_buffer.resize(
-                        (original_compressed_data_buffer_length + bytes_left_in_chunk) as usize,
-                        0);
-
-                    let byte_count = {
-                        let mut compressed_data_buffer = &mut self.compressed_data_buffer[
-                            (original_compressed_data_buffer_length as usize)..];
-                        original_compressed_data_buffer_length +
-                            try!(reader.read(compressed_data_buffer).map_err(PngError::Io)) as u32
-                    };
+                    let bytes_read;
+                    if self.compressed_data_buffer.len() < BUFFER_SIZE {
+                        let original_length = self.compressed_data_buffer.len();
+                        let target_length =
+                            cmp::min(BUFFER_SIZE, original_length + bytes_left_in_chunk as usize);
+                        self.compressed_data_buffer.resize(target_length, 0);
+                        bytes_read =
+                            try!(reader.read(&mut self.compressed_data_buffer[original_length..])
+                                       .map_err(PngError::Io));
+                        debug_assert!(self.compressed_data_buffer.len() <= original_length +
+                                      bytes_read);
+                        self.compressed_data_buffer.truncate(original_length + bytes_read);
+                    } else {
+                        bytes_read = 0
+                    }
 
                     unsafe {
-                        self.z_stream.avail_in = byte_count as u32;
-                        // FIXME(pcwalton): The below line is totally bogus! We need to keep
-                        // track of how far we are in the buffer.
-                        self.z_stream.next_in = &mut self.compressed_data_buffer[0];
+                        self.z_stream.avail_in = (self.compressed_data_buffer.len() -
+                                                  self.compressed_data_consumed) as u32;
+                        self.z_stream.next_in =
+                            &mut self.compressed_data_buffer[self.compressed_data_consumed];
 
-                        // Read the predictor byte.
-                        // TODO(pcwalton): Improve this. This is probably going to show up in
-                        // profiles. SSE alignment restrictions make this annoying, though.
+                        // Read the scanline data.
+                        //
+                        // TODO(pcwalton): This may well show up in profiles. Probably we are going
+                        // to want to read multiple scanlines at once. Before we do this, though,
+                        // we are going to have to deal with SSE alignment restrictions.
                         if self.z_stream.avail_in != 0 {
-                            self.z_stream.avail_out = 1;
-                            self.z_stream.next_out = &mut self.predictor_buffer;
+                            let original_size = self.scanline_data_buffer_size;
+                            self.scanline_data_buffer.resize(1 + stride as usize, 0);
+                            self.z_stream.avail_out = 1 + stride - (original_size as u32);
+                            self.z_stream.next_out = &mut self.scanline_data_buffer[original_size];
+                            debug_assert!(self.z_stream.avail_out as usize + original_size <=
+                                          self.scanline_data_buffer.len());
                             try!(PngError::from_zlib_result(libz_sys::inflate(
-                                        &mut self.z_stream,
-                                        Z_NO_FLUSH)));
+                                    &mut self.z_stream,
+                                    Z_NO_FLUSH)));
+                            self.advance_compressed_data_offset();
+                            self.scanline_data_buffer_size =
+                                (1 + stride - self.z_stream.avail_out) as usize;
                             if self.z_stream.avail_out != 0 {
-                                println!("returning out, couldn't read predictor byte");
-                                return Ok((AddDataResult::Continue))
-                            }
-
-                            println!("read predictor byte!");
-
-                            // Read the scanline data.
-                            //
-                            // TODO(pcwalton): This may well show up in profiles too. Probably we
-                            // are going to want to read multiple scanlines at once. Again, before
-                            // we do this, though, we are going to have to deal with SSE alignment
-                            // restrictions.
-                            let stride = self.stride();
-                            if self.z_stream.avail_in != 0 {
-                                self.scanline_data_buffer.truncate(0);
-                                self.scanline_data_buffer.reserve(stride as usize);
-                                self.z_stream.avail_out = stride;
-                                self.z_stream.next_out = self.scanline_data_buffer.as_mut_ptr();
-                                try!(PngError::from_zlib_result(libz_sys::inflate(
-                                            &mut self.z_stream,
-                                            Z_NO_FLUSH)));
-                                if self.z_stream.avail_out != 0 {
-                                    println!("read scanline but avail_out is {}",
-                                             self.z_stream.avail_out);
-                                    return Ok((AddDataResult::Continue))
-                                } else {
-                                    self.scanline_data_buffer.set_len(stride as usize);
-                                    self.scanline_data_buffer_full = true
-                                }
-                            } else {
-                                println!("no avail_in B, byte_count {}", byte_count);
                                 return Ok((AddDataResult::Continue))
                             }
                         } else {
-                            println!("no avail_in A, byte_count {}", byte_count);
                             return Ok((AddDataResult::Continue))
                         }
                     }
 
-                    let bytes_left_in_chunk_after_read = bytes_left_in_chunk - byte_count;
-                    self.decode_state = if bytes_left_in_chunk_after_read == 0 {
+                    let bytes_left_in_chunk_after_read = bytes_left_in_chunk - bytes_read as u32;
+                    self.decode_state = if bytes_left_in_chunk_after_read == 0 &&
+                            self.compressed_data_consumed >= self.compressed_data_buffer.len() {
                         // Skip over the CRC.
                         try!(reader.seek(SeekFrom::Current(4)).map_err(PngError::Io));
                         DecodeState::LookingForImageData
@@ -174,39 +158,51 @@ impl Image {
                         DecodeState::DecodingData(bytes_left_in_chunk_after_read)
                     }
                 }
-                DecodeState::Finished => {
-                    println!("returning finished!");
-                    return Ok(AddDataResult::Finished)
-                }
+                DecodeState::Finished => return Ok(AddDataResult::Finished),
             }
+        }
+    }
+
+    pub fn advance_compressed_data_offset(&mut self) {
+        self.compressed_data_consumed = self.compressed_data_buffer.len() -
+            self.z_stream.avail_in as usize;
+        if self.compressed_data_consumed == self.compressed_data_buffer.len() {
+            self.compressed_data_consumed = 0;
+            self.compressed_data_buffer.truncate(0)
         }
     }
 
     #[inline(never)]
     pub fn decode(&mut self) -> Result<DecodeResult,PngError> {
+        let stride = self.stride() as usize;
+
         if self.predictor_thread_comm.is_none() {
             self.predictor_thread_comm = Some(MainThreadToPredictorThreadComm::new())
         }
         let predictor_thread_comm = self.predictor_thread_comm.as_mut().unwrap();
 
         let result_buffer = if predictor_thread_comm.is_busy {
-            println!("waiting for result buffer...");
-            predictor_thread_comm.is_busy = false;
-            let result = Some(predictor_thread_comm.receiver.recv().unwrap().0);
-            println!("got result buffer!");
-            result
+            Some(predictor_thread_comm.receiver.recv().unwrap().0)
         } else {
-            println!("no result buffer!");
             None
         };
+        predictor_thread_comm.is_busy = false;
 
-        if self.scanline_data_buffer_full {
+        if self.scanline_data_buffer_size == stride + 1 {
+            let predictor = self.scanline_data_buffer[0];
+            for i in 0..stride {
+                self.scanline_data_buffer[i] = self.scanline_data_buffer[i + 1]
+            }
+            self.scanline_data_buffer.pop();
+
             let msg = MainThreadToPredictorThreadMsg::Predict(
-                try!(Predictor::from_byte(self.predictor_buffer)),
+                self.metadata.as_ref().unwrap().dimensions.width,
+                self.metadata.as_ref().unwrap().color_depth,
+                try!(Predictor::from_byte(predictor)),
                 mem::replace(&mut self.scanline_data_buffer, vec![]));
+            self.scanline_data_buffer_size = 0;
             predictor_thread_comm.sender.send(msg).unwrap();
-            predictor_thread_comm.is_busy = true;
-            self.scanline_data_buffer_full = false
+            predictor_thread_comm.is_busy = true
         }
 
         match result_buffer {
@@ -288,10 +284,96 @@ impl Predictor {
             byte => Err(PngError::InvalidScanlinePredictor(byte)),
         }
     }
+
+    fn predict(self,
+               this: &mut [u8],
+               prev: &[u8],
+               width: u32,
+               color_depth: u8,
+               mut a: [u8; 4],
+               mut c: [u8; 4]) {
+        debug_assert!(color_depth == 32);
+        match self {
+            Predictor::None => {}
+            Predictor::Left => {
+                for this in this.chunks_mut(4) {
+                    for (this, a) in this.iter_mut().zip(a.iter_mut()) {
+                        *a = this.wrapping_add(*a);
+                        *this = *a
+                    }
+                }
+            }
+            Predictor::Up => {
+                for (this, b) in this.iter_mut().zip(prev.iter()) {
+                    *this = this.wrapping_add(*b)
+                }
+            }
+            Predictor::Average => {
+                for (this, b) in this.chunks_mut(4).zip(prev.chunks(4)) {
+                    for (this, (b, a)) in this.iter_mut().zip(b.iter().zip(a.iter_mut())) {
+                        *a = this.wrapping_add((((*a as u16) + (*b as u16)) / 2) as u8);
+                        *this = *a
+                    }
+                }
+            }
+            Predictor::Paeth => {
+                for (this, b) in this.chunks_mut(4).zip(prev.chunks(4)) {
+                    for (a, (b, (c, this))) in a.iter_mut()
+                                                .zip(b.iter()
+                                                      .zip(c.iter_mut().zip(this.iter_mut()))) {
+                        *a = this.wrapping_add(paeth(*a, *b, *c));
+                        *c = *b;
+                        *this = *a
+                    }
+                }
+            }
+        }
+
+        fn paeth(a: u8, b: u8, c: u8) -> u8 {
+            let (a, b, c) = (a as i16, b as i16, c as i16);
+            let p = a + b - c;
+            let pa = (p - a).abs();
+            let pb = (p - b).abs();
+            let pc = (p - c).abs();
+            if pa <= pb && pa <= pc {
+                a as u8
+            } else if pb <= pc {
+                b as u8
+            } else {
+                c as u8
+            }
+        }
+    }
+
+    fn accelerated_predict(self,
+                           this: &mut [u8],
+                           prev: &[u8],
+                           width: u32,
+                           color_depth: u8,
+                           mut a: [u8; 4],
+                           mut c: [u8; 4]) {
+        // FIXME(pcwalton): For now, we don't support starting with nonzero a or c.
+        debug_assert!(a == [0; 4]);
+        debug_assert!(c == [0; 4]);
+        debug_assert!(((this.as_ptr() as usize) & 0xf) == 0);
+        debug_assert!(((prev.as_ptr() as usize) & 0xf) == 0);
+
+        let decode_scanline = match self {
+            Predictor::None => return,
+            Predictor::Left => parng_predict_scanline_left,
+            Predictor::Up => parng_predict_scanline_up,
+            Predictor::Average => parng_predict_scanline_average,
+            Predictor::Paeth => parng_predict_scanline_paeth,
+        };
+        unsafe {
+            decode_scanline(this.as_mut_ptr(), prev.as_ptr(), width as u64)
+        }
+    }
 }
 
 enum MainThreadToPredictorThreadMsg {
-    Predict(Predictor, Vec<u8>),
+    // Width, color depth, predictor, and scanline data.
+    Predict(u32, u8, Predictor, Vec<u8>),
 }
 
 struct PredictorThreadToMainThreadMsg(Vec<u8>);
@@ -309,9 +391,7 @@ impl MainThreadToPredictorThreadComm {
         let (predictor_thread_to_main_thread_sender, predictor_thread_to_main_thread_receiver) =
             mpsc::channel();
         thread::spawn(move || {
-            // TODO(pcwalton): Support other color depths!
-            predictor_thread(32,
-                             predictor_thread_to_main_thread_sender,
+            predictor_thread(predictor_thread_to_main_thread_sender,
                              main_thread_to_predictor_thread_receiver)
         });
         MainThreadToPredictorThreadComm {
@@ -328,27 +408,46 @@ pub enum DecodeResult<'a> {
     Scanline(&'a mut [u8]),
 }
 
-fn predictor_thread(color_depth: u8,
-                    sender: Sender<PredictorThreadToMainThreadMsg>,
+fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
                     receiver: Receiver<MainThreadToPredictorThreadMsg>) {
     let mut prev = vec![];
     while let Ok(msg) = receiver.recv() {
         match msg {
-            MainThreadToPredictorThreadMsg::Predict(predictor, mut scanline) => {
-                let stride = scanline.len();
-                let width = stride / (color_depth as usize / 8);
-                if prev.len() != stride {
-                    prev = scanline.iter().map(|_| 0).collect();
-                }
-                let decode_scanline = match predictor {
-                    Predictor::None => parng_predict_scanline_none,
-                    Predictor::Left => parng_predict_scanline_left,
-                    Predictor::Up => parng_predict_scanline_up,
-                    Predictor::Average => parng_predict_scanline_average,
-                    Predictor::Paeth => parng_predict_scanline_paeth,
+            MainThreadToPredictorThreadMsg::Predict(width,
+                                                    color_depth,
+                                                    predictor,
+                                                    mut scanline) => {
+                let stride = (width as usize) * (color_depth as usize / 8);
+                let aligned_stride = if stride % 16 != 0 {
+                    stride + 16 - stride % 16
+                } else {
+                    stride
                 };
-                unsafe {
-                    decode_scanline(&mut scanline[0], &prev[0], width as u64)
+                while prev.len() < aligned_stride {
+                    prev.push(0)
+                }
+                while scanline.len() < aligned_stride {
+                    scanline.push(0)
+                }
+                match predictor {
+                    Predictor::None | Predictor::Left | Predictor::Up => {
+                        predictor.accelerated_predict(&mut scanline[..],
+                                                      &prev[..],
+                                                      width,
+                                                      color_depth,
+                                                      [0; 4],
+                                                      [0; 4])
+                    }
+                    Predictor::Average | Predictor::Paeth => {
+                        // FIXME(pcwalton): These two are broken in accelerated versions, so fall
+                        // back to the non-accelerated path.
+                        predictor.predict(&mut scanline[..],
+                                          &prev[..],
+                                          width,
+                                          color_depth,
+                                          [0; 4],
+                                          [0; 4]);
+                    }
                 }
                 // FIXME(pcwalton): Any way to avoid this copy?
                 prev[..].clone_from_slice(&mut scanline[..]);
@@ -366,7 +465,6 @@ unsafe fn inflateInit(strm: *mut z_stream) -> c_int {
 
 #[link(name="parngpredict")]
 extern {
-    fn parng_predict_scanline_none(this: *mut u8, prev: *const u8, width: u64);
     fn parng_predict_scanline_left(this: *mut u8, prev: *const u8, width: u64);
     fn parng_predict_scanline_up(this: *mut u8, prev: *const u8, width: u64);
     fn parng_predict_scanline_average(this: *mut u8, prev: *const u8, width: u64);

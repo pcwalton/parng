@@ -10,7 +10,6 @@ use clap::{App, Arg};
 use parng::{AddDataResult, DecodeResult, Image};
 use std::fs::File;
 use std::io::{BufWriter, Cursor, Read, Write};
-use std::str::FromStr;
 
 const BPP: u32 = 4;
 
@@ -45,7 +44,6 @@ fn main() {
                 DecodeResult::None => {}
             }
         }
-        println!("got scanline: {}", y);
     }
     println!("Elapsed time: {}ms", (time::precise_time_ns() - before) as f32 / 1_000_000.0);
 

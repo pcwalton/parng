@@ -20,10 +20,6 @@ global parng_predict_scanline_paeth
 
 section .text
 
-; parng_predict_scanline_none(uint8x4 *this, uint8x4 *prev, uint64_t width)
-parng_predict_scanline_none:
-    ret
-
 ; parng_predict_scanline_left(uint8x4 *this, uint8x4 *prev, uint64_t width)
 ;
 ; https://github.com/kobalicek/simdtests/blob/master/depng/depng_sse2.cpp
@@ -49,7 +45,7 @@ parng_predict_scanline_up:
 .loop:
     movdqu xmm0,[prev_line+rax*4]               ; xmm0 = prev
     paddb xmm0,[this_line+rax*4]                ; xmm0 = prev + this
-    movdqu [this_line+width*4],xmm0             ; write result
+    movdqu [this_line+rax*4],xmm0               ; write result
     add rax,4
     cmp rax,width
     jb .loop

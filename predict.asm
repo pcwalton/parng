@@ -56,8 +56,7 @@ parng_predict_scanline_up:
 ; This is sequential across pixels since there's really no way to eliminate the data dependency
 ; that I can see. STOKE couldn't find a way either.
 ;
-; We do this computation in the high 8 bits of each 16-bit value to work around the fact that SSE
-; average instructions add an extra 1.
+; FIXME(pcwalton): This could be shorter with an unrolled loop.
 parng_predict_scanline_average:
     xorps xmm0,xmm0                             ; xmm0 = a = 0
     mov rax,0x8080808006040200                  ; rax = 16->8 shuffle mask

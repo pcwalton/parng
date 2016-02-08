@@ -453,8 +453,15 @@ unsafe fn inflateInit(strm: *mut z_stream) -> c_int {
     libz_sys::inflateInit_(strm, version, mem::size_of::<z_stream>() as c_int)
 }
 
-#[link(name="parngpredict")]
+#[link(name="parngacceleration")]
 extern {
+    fn parng_deinterlace_scanline_04(dest: *mut u8,
+                                     lod0: *const u8,
+                                     lod1: *const u8,
+                                     lod3: *const u8,
+                                     lod5: *const u8,
+                                     width: u64);
+    fn parng_deinterlace_scanline_26(dest: *mut u8, lod4: *const u8, lod5: *const u8, width: u64);
     fn parng_predict_scanline_left(this: *mut u8, prev: *const u8, width: u64);
     fn parng_predict_scanline_up(this: *mut u8, prev: *const u8, width: u64);
     fn parng_predict_scanline_average(this: *mut u8, prev: *const u8, width: u64);

@@ -2,7 +2,6 @@
 
 bits 64
 
-global parng_predict_scanline_none
 global parng_predict_scanline_left
 global parng_predict_scanline_up
 global parng_predict_scanline_average

@@ -90,6 +90,8 @@ parng_predict_scanline_average:
 parng_predict_scanline_paeth:
     xorps xmm0,xmm0             ; xmm0 = a = 0
     xorps xmm2,xmm2             ; xmm2 = c = 0
+    mov rax,0x8080808006040200  ; rax = 16->8 shuffle mask
+    movq xmm9,rax               ; xmm9 = 16->8 shuffle mask
     xor rax,rax
 .loop:
     pmovzxbw xmm1,[prev_line+rax*4]     ; xmm1 = b
@@ -110,7 +112,7 @@ parng_predict_scanline_paeth:
     pmaxsw xmm8,xmm7            ; xmm8 = ¬(pa≤pc) ∧ ¬(pb≤pc) ? c : (pa≤pb) ∧ (pa≤pc) ? a : b
     pmovzxbw xmm0,[this_line+rax*4]
     paddw xmm0,xmm8             ; xmm0 = next a = output pixel
-    vpackuswb xmm3,xmm0,xmm0    ; xmm3 = output pixel (8-bit)
+    vpshufb xmm3,xmm0,xmm9      ; xmm3 = output pixel (8-bit)
     movd [this_line+rax*4],xmm3 ; write output pixel
     movdqa xmm2,xmm1            ; c = b
     inc rax

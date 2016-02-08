@@ -427,8 +427,8 @@ fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
                     scanline.push(0)
                 }
                 match predictor {
-                    Predictor::None | Predictor::Left | Predictor::Up | Predictor::Average /*|
-                    Predictor::Paeth */=> {
+                    Predictor::None | Predictor::Left | Predictor::Up | Predictor::Average |
+                    Predictor::Paeth => {
                         predictor.accelerated_predict(&mut scanline[..],
                                                       &prev[..],
                                                       width,
@@ -436,7 +436,7 @@ fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
                                                       [0; 4],
                                                       [0; 4])
                     }
-                    Predictor::Paeth => {
+                    /*Predictor::Paeth => {
                         // FIXME(pcwalton): These two are broken in accelerated versions, so fall
                         // back to the non-accelerated path.
                         predictor.predict(&mut scanline[..],
@@ -445,7 +445,7 @@ fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
                                           color_depth,
                                           [0; 4],
                                           [0; 4]);
-                    }
+                    }*/
                 }
                 // FIXME(pcwalton): Any way to avoid this copy?
                 prev[..].clone_from_slice(&mut scanline[..]);

@@ -140,9 +140,6 @@ impl Image {
                             self.advance_compressed_data_offset();
                             self.scanline_data_buffer_size =
                                 (1 + stride - self.z_stream.avail_out) as usize;
-                            if self.z_stream.avail_out != 0 {
-                                return Ok((AddDataResult::Continue))
-                            }
                         } else {
                             return Ok((AddDataResult::Continue))
                         }
@@ -430,7 +427,8 @@ fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
                     scanline.push(0)
                 }
                 match predictor {
-                    Predictor::None | Predictor::Left | Predictor::Up => {
+                    Predictor::None | Predictor::Left | Predictor::Up | Predictor::Average /*|
+                    Predictor::Paeth */=> {
                         predictor.accelerated_predict(&mut scanline[..],
                                                       &prev[..],
                                                       width,
@@ -438,7 +436,7 @@ fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
                                                       [0; 4],
                                                       [0; 4])
                     }
-                    Predictor::Average | Predictor::Paeth => {
+                    Predictor::Paeth => {
                         // FIXME(pcwalton): These two are broken in accelerated versions, so fall
                         // back to the non-accelerated path.
                         predictor.predict(&mut scanline[..],

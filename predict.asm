@@ -56,14 +56,15 @@ parng_predict_scanline_up:
 ; This is sequential across pixels since there's really no way to eliminate the data dependency
 ; that I can see. STOKE couldn't find a way either.
 ;
-; FIXME(pcwalton): This is really inefficient. Optimize this.
+; TODO(pcwalton): Unroll the inner loop to save some `movd`s.
 parng_predict_scanline_average:
-    xorps xmm0,xmm0                             ; xmm0 = a
+    xorps xmm0,xmm0                             ; xmm0 = a = 0
+    pcmpeqb xmm2,xmm2                           ; xmm2 = 0xffffffff...
     xor rax,rax
 .loop:
-    movd xmm1,[prev_line+rax*4]                 ; xmm1 = b
-    pavgb xmm0,xmm1                             ; xmm0 = avg(a, b)
-    movd xmm1,[this_line+rax*4]                 ; xmm1 = a
+    vpaddb xmm1,xmm2,[prev_line+rax*4]          ; xmm1 = b - 1
+    pavgb xmm0,xmm1                             ; xmm0 = avg(a, b - 1 + 1) = avg(a, b)
+    movd xmm1,[this_line+rax*4]                 ; xmm1 = this
     paddb xmm0,xmm1                             ; xmm0 = this + avg(a, b)
     movd [this_line+rax*4],xmm0                 ; write this
     inc rax
@@ -91,7 +92,7 @@ parng_predict_scanline_paeth:
     xorps xmm2,xmm2             ; xmm2 = c = 0
     xor rax,rax
 .loop:
-    pmovzxbw xmm1,[prev_line+rax*4]   ; xmm1 = b
+    pmovzxbw xmm1,[prev_line+rax*4]     ; xmm1 = b
     vpsubw xmm4,xmm2,xmm1       ; xmm4 = c - b = ±pa
     vpsubw xmm5,xmm0,xmm2       ; xmm5 = a - c = ±pb
     vpsubw xmm6,xmm5,xmm4       ; xmm6 = a - c - c + b = a + b - 2c = ±pc

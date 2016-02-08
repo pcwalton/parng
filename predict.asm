@@ -56,17 +56,23 @@ parng_predict_scanline_up:
 ; This is sequential across pixels since there's really no way to eliminate the data dependency
 ; that I can see. STOKE couldn't find a way either.
 ;
-; TODO(pcwalton): Unroll the inner loop to save some `movd`s.
+; We do this computation in the high 8 bits of each 16-bit value to work around the fact that SSE
+; average instructions add an extra 1.
 parng_predict_scanline_average:
     xorps xmm0,xmm0                             ; xmm0 = a = 0
-    pcmpeqb xmm2,xmm2                           ; xmm2 = 0xffffffff...
+    mov rax,0x8080808006040200                  ; rax = 16->8 shuffle mask
+    movq xmm3,rax                               ; xmm3 = 16->8 shuffle mask
+    xorps xmm4,xmm4                             ; xmm4 = 0
     xor rax,rax
 .loop:
-    vpaddb xmm1,xmm2,[prev_line+rax*4]          ; xmm1 = b - 1
-    pavgb xmm0,xmm1                             ; xmm0 = avg(a, b - 1 + 1) = avg(a, b)
-    movd xmm1,[this_line+rax*4]                 ; xmm1 = this
-    paddb xmm0,xmm1                             ; xmm0 = this + avg(a, b)
+    pmovzxbw xmm1,[prev_line+rax*4]
+    paddw xmm0,xmm1
+    psrlw xmm0,1
+    pshufb xmm0,xmm3
+    movd xmm1,[this_line+rax*4]
+    paddb xmm0,xmm1
     movd [this_line+rax*4],xmm0                 ; write this
+    pmovzxbw xmm0,xmm0
     inc rax
     cmp rax,width
     jb .loop
@@ -91,28 +97,32 @@ parng_predict_scanline_paeth:
     xorps xmm0,xmm0             ; xmm0 = a = 0
     xorps xmm2,xmm2             ; xmm2 = c = 0
     mov rax,0x8080808006040200  ; rax = 16->8 shuffle mask
-    movq xmm9,rax               ; xmm9 = 16->8 shuffle mask
+    movq xmm12,rax              ; xmm12 = 16->8 shuffle mask
+    mov rax,0x00ff00ff00ff00ff
+    movq xmm10,rax
     xor rax,rax
 .loop:
     pmovzxbw xmm1,[prev_line+rax*4]     ; xmm1 = b
+
     vpsubw xmm4,xmm2,xmm1       ; xmm4 = c - b = ±pa
     vpsubw xmm5,xmm0,xmm2       ; xmm5 = a - c = ±pb
     vpsubw xmm6,xmm5,xmm4       ; xmm6 = a - c - c + b = a + b - 2c = ±pc
     pabsw xmm4,xmm4             ; xmm4 = pa
     pabsw xmm5,xmm5             ; xmm5 = pb
     pabsw xmm6,xmm6             ; xmm6 = pc
-    vpminuw xmm7,xmm4,xmm5      ; xmm7 = min(pa, pb)
+    vpminsw xmm7,xmm4,xmm5      ; xmm7 = min(pa, pb)
     pcmpgtw xmm4,xmm5           ; xmm4 = pa > pb = ¬(pa ≤ pb)
-    vpandn xmm8,xmm4,xmm0       ; xmm8 = a if pa ≤ pb
     pcmpgtw xmm7,xmm6           ; xmm7 = min(pa, pb) > pc = ¬(pa ≤ pc) ∧ ¬(pb ≤ pc)
+    vpandn xmm8,xmm4,xmm0       ; xmm8 = a if pa ≤ pb
     pand xmm4,xmm1              ; xmm4 = b if ¬(pa ≤ pb)
     por xmm4,xmm7               ; xmm7 = ¬(pa ≤ pc) ∧ ¬(pb ≤ pc) ? TRUE : ¬(pa ≤ pb) ? b : FALSE
     por xmm8,xmm4               ; xmm8 = ¬(pa ≤ pc) ∧ ¬(pb ≤ pc) ? TRUE : pa ≤ pb ? a : b
-    pand xmm7,xmm2              ; xmm7 = ¬(pa ≤ pc) ∧ ¬(pb ≤ pc) ? c : ¬(pa ≤ pb) ? undef : FALSE
-    pmaxsw xmm8,xmm7            ; xmm8 = ¬(pa≤pc) ∧ ¬(pb≤pc) ? c : (pa≤pb) ∧ (pa≤pc) ? a : b
-    pmovzxbw xmm0,[this_line+rax*4]
-    paddw xmm0,xmm8             ; xmm0 = next a = output pixel
-    vpshufb xmm3,xmm0,xmm9      ; xmm3 = output pixel (8-bit)
+    pand xmm4,xmm2              ; xmm7 = ¬(pa ≤ pc) ∧ ¬(pb ≤ pc) ? c : ¬(pa ≤ pb) ? undef : FALSE
+    pmaxsw xmm8,xmm4            ; xmm8 = ¬(pa≤pc) ∧ ¬(pb≤pc) ? c : (pa≤pb) ∧ (pa≤pc) ? a : b
+
+    pmovzxbw xmm0,[this_line+rax*4]     ; xmm0 = original pixel (16 bit)
+    paddb xmm0,xmm8             ; xmm0 = next a = output pixel
+    vpshufb xmm3,xmm0,xmm12     ; xmm3 = output pixel (8-bit)
     movd [this_line+rax*4],xmm3 ; write output pixel
     movdqa xmm2,xmm1            ; c = b
     inc rax

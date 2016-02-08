@@ -31,8 +31,10 @@ fn main() {
 
     let dimensions = image.metadata().as_ref().unwrap().dimensions;
 
-    let before = time::precise_time_ns();
     let mut pixels = vec![];
+    pixels.reserve((dimensions.width as usize) * (dimensions.height as usize) * 4);
+
+    let before = time::precise_time_ns();
     for y in 0..dimensions.height {
         loop {
             while let AddDataResult::Continue = image.add_data(&mut input_buffer).unwrap() {}

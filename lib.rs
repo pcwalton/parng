@@ -186,6 +186,7 @@ impl Image {
         predictor_thread_comm.is_busy = false;
 
         if self.scanline_data_buffer_size == stride + 1 {
+            // FIXME(pcwalton): This is killing our performance. Stop doing it.
             let predictor = self.scanline_data_buffer[0];
             for i in 0..stride {
                 self.scanline_data_buffer[i] = self.scanline_data_buffer[i + 1]
@@ -318,9 +319,10 @@ impl Predictor {
                     for (a, (b, (c, this))) in a.iter_mut()
                                                 .zip(b.iter()
                                                       .zip(c.iter_mut().zip(this.iter_mut()))) {
-                        *a = this.wrapping_add(paeth(*a, *b, *c));
+                        let paeth = paeth(*a, *b, *c);
+                        *a = this.wrapping_add(paeth);
                         *c = *b;
-                        *this = *a
+                        *this = *a;
                     }
                 }
             }
@@ -427,8 +429,8 @@ fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
                     scanline.push(0)
                 }
                 match predictor {
-                    Predictor::None | Predictor::Left | Predictor::Up | Predictor::Average |
-                    Predictor::Paeth => {
+                    Predictor::None | Predictor::Left | Predictor::Up | Predictor::Paeth |
+                    Predictor::Average => {
                         predictor.accelerated_predict(&mut scanline[..],
                                                       &prev[..],
                                                       width,
@@ -436,16 +438,6 @@ fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
                                                       [0; 4],
                                                       [0; 4])
                     }
-                    /*Predictor::Paeth => {
-                        // FIXME(pcwalton): These two are broken in accelerated versions, so fall
-                        // back to the non-accelerated path.
-                        predictor.predict(&mut scanline[..],
-                                          &prev[..],
-                                          width,
-                                          color_depth,
-                                          [0; 4],
-                                          [0; 4]);
-                    }*/
                 }
                 // FIXME(pcwalton): Any way to avoid this copy?
                 prev[..].clone_from_slice(&mut scanline[..]);

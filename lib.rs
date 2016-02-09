@@ -26,6 +26,13 @@ pub struct Image {
     compressed_data_consumed: usize,
     scanline_data_buffer: Vec<u8>,
     scanline_data_buffer_size: usize,
+
+    /// If `None`, the buffered scanline isn't full yet.
+    ///
+    /// FIXME(pcwalton): This is kind of an ugly way to keep track of the scanline data buffer's
+    /// fullness; can we do something nicer?
+    scanline_data_buffer_lod: Option<LevelOfDetail>,
+
     current_y: u32,
     current_lod: LevelOfDetail,
     decode_state: DecodeState,
@@ -54,6 +61,7 @@ impl Image {
             compressed_data_consumed: 0,
             scanline_data_buffer: vec![],
             scanline_data_buffer_size: 0,
+            scanline_data_buffer_lod: None,
             current_y: 0,
             current_lod: LevelOfDetail::None,
             decode_state: DecodeState::Start,
@@ -106,7 +114,7 @@ impl Image {
                 }
                 DecodeState::DecodingData(bytes_left_in_chunk) => {
                     let stride = self.stride_for_lod(self.current_lod);
-                    if self.scanline_data_buffer_size == 1 + stride as usize {
+                    if self.scanline_data_buffer_lod.is_some() {
                         return Ok(AddDataResult::BufferFull)
                     }
 
@@ -158,10 +166,13 @@ impl Image {
                     // Advance the Y position if necessary.
                     if self.scanline_data_buffer_size == 1 + stride as usize {
                         self.current_y += 1;
-                        if self.current_y == self.metadata.as_ref().unwrap().dimensions.height {
+                        self.scanline_data_buffer_lod = Some(self.current_lod);
+                        //println!("incrementing current Y: now at {}", self.current_y);
+                        if self.current_y == self.height_for_lod(self.current_lod) {
                             self.current_y = 0;
                             if let LevelOfDetail::Adam7(ref mut current_lod) = self.current_lod {
-                                *current_lod += 1
+                                *current_lod += 1;
+                                println!("incrementing LOD: now at {}", *current_lod);
                             }
                         }
                     }
@@ -176,7 +187,10 @@ impl Image {
                         DecodeState::DecodingData(bytes_left_in_chunk_after_read)
                     }
                 }
-                DecodeState::Finished => return Ok(AddDataResult::Finished),
+                DecodeState::Finished => {
+                    println!("Finished!");
+                    return Ok(AddDataResult::Finished)
+                }
             }
         }
     }
@@ -192,8 +206,10 @@ impl Image {
 
     #[inline(never)]
     pub fn decode(&mut self) -> Result<DecodeResult,PngError> {
-        let stride = self.stride_for_lod(self.current_lod) as usize;
-        let width_for_current_lod = self.width_for_lod(self.current_lod);
+        let width_and_stride_for_scanline_data_buffer_if_full =
+            self.scanline_data_buffer_lod.map(|lod| {
+                (self.width_for_lod(lod), self.stride_for_lod(lod))
+            });
 
         if self.predictor_thread_comm.is_none() {
             self.predictor_thread_comm = Some(MainThreadToPredictorThreadComm::new())
@@ -207,16 +223,17 @@ impl Image {
         };
         predictor_thread_comm.is_busy = false;
 
-        if self.scanline_data_buffer_size == stride + 1 {
+        if let Some((scanline_width, scanline_stride)) =
+                width_and_stride_for_scanline_data_buffer_if_full {
             // FIXME(pcwalton): This is killing our performance. Stop doing it.
             let predictor = self.scanline_data_buffer[0];
-            for i in 0..stride {
+            for i in 0..(scanline_stride as usize) {
                 self.scanline_data_buffer[i] = self.scanline_data_buffer[i + 1]
             }
             self.scanline_data_buffer.pop();
 
             let msg = MainThreadToPredictorThreadMsg::Predict(
-                width_for_current_lod,
+                scanline_width,
                 self.metadata.as_ref().unwrap().color_depth,
                 try!(Predictor::from_byte(predictor)),
                 mem::replace(&mut self.scanline_data_buffer, vec![]));
@@ -224,9 +241,11 @@ impl Image {
             predictor_thread_comm.sender.send(msg).unwrap();
             predictor_thread_comm.is_busy = true
         }
+        self.scanline_data_buffer_lod = None;
 
         match result_buffer {
             Some(result_buffer) => {
+                // FIXME(pcwalton): The LOD returned here is wrong!
                 self.scanline_data_buffer = result_buffer;
                 Ok(DecodeResult::Scanline(&mut self.scanline_data_buffer[..], self.current_lod))
             }
@@ -246,7 +265,20 @@ impl Image {
             LevelOfDetail::Adam7(0) | LevelOfDetail::Adam7(1) => image_width / 8,
             LevelOfDetail::Adam7(2) | LevelOfDetail::Adam7(3) => image_width / 4,
             LevelOfDetail::Adam7(4) | LevelOfDetail::Adam7(5) => image_width / 2,
-            _ => image_width
+            _ => image_width,
+        }
+    }
+
+    fn height_for_lod(&self, lod: LevelOfDetail) -> u32 {
+        let metadata = self.metadata.as_ref().unwrap();
+        let image_height = metadata.dimensions.height;
+        match lod {
+            LevelOfDetail::Adam7(0) |
+            LevelOfDetail::Adam7(1) |
+            LevelOfDetail::Adam7(2) => image_height / 8,
+            LevelOfDetail::Adam7(3) | LevelOfDetail::Adam7(4) => image_height / 4,
+            LevelOfDetail::Adam7(5) => image_height / 2,
+            _ => image_height,
         }
     }
 
@@ -493,7 +525,7 @@ pub fn deinterlace_adam7(out_scanlines: &mut [u8],
                          width: u32,
                          color_depth: u8) {
     let stride = (width as usize) * (color_depth as usize) / 8;
-    assert!(out_scanlines.len() >= 7 * stride);
+    assert!(out_scanlines.len() >= 8 * stride);
     assert!(in_scanlines.are_well_formed(stride));
     unsafe {
         parng_deinterlace_adam7_scanline_04(dest(out_scanlines,
@@ -606,8 +638,7 @@ pub struct Adam7Scanlines<'a> {
     pub lod3: Option<[&'a [u8]; 2]>,    // width / 4
     pub lod4: Option<[&'a [u8]; 2]>,    // width / 2
     pub lod5: Option<[&'a [u8]; 4]>,    // width / 2
-    pub lod6: Option<[&'a [u8]; 4]>,    // width / 2
-    pub lod7: Option<[&'a [u8]; 4]>,    // width
+    pub lod6: Option<[&'a [u8]; 4]>,    // width
 }
 
 impl<'a> Adam7Scanlines<'a> {
@@ -619,8 +650,7 @@ impl<'a> Adam7Scanlines<'a> {
             self.lod3.are_well_formed(stride / 4) &&
             self.lod4.are_well_formed(stride / 2) &&
             self.lod5.are_well_formed(stride / 2) &&
-            self.lod6.are_well_formed(stride / 2) &&
-            self.lod7.are_well_formed(stride)
+            self.lod6.are_well_formed(stride)
     }
 }
 

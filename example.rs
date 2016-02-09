@@ -34,71 +34,100 @@ fn main() {
 
     let mut pixels = vec![];
     let mut interlaced_pixels = [vec![], vec![], vec![], vec![], vec![], vec![], vec![]];
-    let stride = dimensions.height as usize * 4;
-    pixels.reserve((dimensions.width as usize) * stride);
+    let stride = dimensions.width as usize * 4;
+    pixels.reserve((dimensions.height as usize) * stride);
 
     let before = time::precise_time_ns();
-    for y in 0..dimensions.height {
+    'outer: loop {
         loop {
-            while let AddDataResult::Continue = image.add_data(&mut input_buffer).unwrap() {}
-            match image.decode().unwrap() {
-                DecodeResult::Scanline(scanline, LevelOfDetail::Adam7(lod)) => {
-                    interlaced_pixels[lod as usize].extend_from_slice(&scanline[..]);
-                    if lod == 6 && interlaced_pixels[6].len() >= stride * 4 {
-                        // FIXME(pcwalton): Do this in a separate thread for parallelism.
-                        //
-                        // TODO(pcwalton): Figure out a nice way to expose this in the API. The
-                        // low-level control philosophy of parng has jumped the shark at this
-                        // point.
-                        let scanlines = Adam7Scanlines {
-                            lod0: [&interlaced_pixels[0][..]],
-                            lod1: Some([&interlaced_pixels[1][..]]),
-                            lod2: Some([&interlaced_pixels[2][..]]),
-                            lod3: Some([
-                                &interlaced_pixels[3][0..(stride / 2)],
-                                &interlaced_pixels[3][(stride / 2)..stride],
-                            ]),
-                            lod4: Some([
-                                &interlaced_pixels[4][0..(stride / 2)],
-                                &interlaced_pixels[4][(stride / 2)..stride],
-                            ]),
-                            lod5: Some([
-                                &interlaced_pixels[5][0..(stride / 2)],
-                                &interlaced_pixels[5][(stride / 2)..stride],
-                                &interlaced_pixels[5][stride..(stride * 3 / 2)],
-                                &interlaced_pixels[5][(stride * 3 / 2)..],
-                            ]),
-                            lod6: Some([
-                                &interlaced_pixels[6][0..(stride / 2)],
-                                &interlaced_pixels[6][(stride / 2)..stride],
-                                &interlaced_pixels[6][stride..(stride * 3 / 2)],
-                                &interlaced_pixels[6][(stride * 3 / 2)..],
-                            ]),
-                            lod7: Some([
-                                &interlaced_pixels[7][0..stride],
-                                &interlaced_pixels[7][stride..stride * 2],
-                                &interlaced_pixels[7][stride * 2..stride * 3],
-                                &interlaced_pixels[7][stride * 3..],
-                            ]),
-                        };
-
-                        let original_length = pixels.len();
-                        pixels.resize(original_length + stride, 0);
-                        parng::deinterlace_adam7(&mut pixels[original_length..],
-                                                 &scanlines,
-                                                 dimensions.width,
-                                                 color_depth);
-                    }
-                    break
-                }
-                DecodeResult::Scanline(scanline, LevelOfDetail::None) => {
-                    pixels.extend_from_slice(&scanline[..]);
-                    break
-                }
-                DecodeResult::None => {}
+            match image.add_data(&mut input_buffer).unwrap() {
+                AddDataResult::Continue => {}
+                AddDataResult::BufferFull => break,
+                AddDataResult::Finished => break 'outer,
             }
         }
+
+        match image.decode().unwrap() {
+            DecodeResult::Scanline(scanline, LevelOfDetail::Adam7(lod)) => {
+                //println!("got scanline with LOD {:?}", lod);
+                interlaced_pixels[lod as usize].extend_from_slice(&scanline[..]);
+                if lod == 6 && interlaced_pixels[6].len() >= stride * 4 {
+                    // FIXME(pcwalton): Do this in a separate thread for parallelism.
+                    //
+                    // TODO(pcwalton): Figure out a nice way to expose this in the API. The
+                    // low-level control philosophy of parng has jumped the shark at this
+                    // point.
+                    let original_length = pixels.len();
+                    pixels.resize(original_length + stride * 8, 0);
+                    let lengths = [
+                        stride / 8,
+                        stride / 8,
+                        stride / 4,
+                        stride / 2,
+                        stride,
+                        stride * 2,
+                        stride * 4
+                    ];
+                    if interlaced_pixels.iter().zip(lengths.iter()).all(|(pixels, &length)| {
+                                pixels.len() >= length
+                            }) {
+                        {
+                            let scanlines = Adam7Scanlines {
+                                lod0: [&interlaced_pixels[0][..]],
+                                lod1: Some([&interlaced_pixels[1][..]]),
+                                lod2: Some([&interlaced_pixels[2][..]]),
+                                lod3: Some([
+                                    &interlaced_pixels[3][0..(stride / 2)],
+                                    &interlaced_pixels[3][(stride / 2)..stride],
+                                ]),
+                                lod4: Some([
+                                    &interlaced_pixels[4][0..(stride / 2)],
+                                    &interlaced_pixels[4][(stride / 2)..stride],
+                                ]),
+                                lod5: Some([
+                                    &interlaced_pixels[5][0..(stride / 2)],
+                                    &interlaced_pixels[5][(stride / 2)..stride],
+                                    &interlaced_pixels[5][stride..(stride * 3 / 2)],
+                                    &interlaced_pixels[5][(stride * 3 / 2)..],
+                                ]),
+                                lod6: Some([
+                                    &interlaced_pixels[6][0..stride],
+                                    &interlaced_pixels[6][stride..stride * 2],
+                                    &interlaced_pixels[6][stride * 2..stride * 3],
+                                    &interlaced_pixels[6][stride * 3..],
+                                ]),
+                            };
+
+                            parng::deinterlace_adam7(&mut pixels[original_length..],
+                                                     &scanlines,
+                                                     dimensions.width,
+                                                     color_depth);
+                        }
+
+                        // FIXME(pcwalton): Hideously inefficient.
+                        for (buffer, &length) in interlaced_pixels.iter_mut().zip(lengths.iter()) {
+                            let original_length = buffer.len();
+                            for i in 0..(original_length - length) {
+                                buffer[i] = buffer[length + i]
+                            }
+                            buffer.truncate(original_length - length);
+                        }
+                    } else {
+                        println!("bad lengths: {:?} stride={}",
+                                 interlaced_pixels.iter()
+                                                  .map(|pixels| pixels.len())
+                                                  .collect::<Vec<_>>(),
+                                 stride);
+                    }
+                }
+            }
+            DecodeResult::Scanline(scanline, LevelOfDetail::None) => {
+                pixels.extend_from_slice(&scanline[..]);
+            }
+            DecodeResult::None => {}
+        }
     }
+    pixels.resize((dimensions.height as usize) * stride, 0);   // FIXME(pcwalton)
     println!("Elapsed time: {}ms", (time::precise_time_ns() - before) as f32 / 1_000_000.0);
 
     let mut output = BufWriter::new(File::create(out_path).unwrap());

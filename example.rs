@@ -7,7 +7,7 @@ extern crate time;
 
 use byteorder::{LittleEndian, WriteBytesExt};
 use clap::{App, Arg};
-use parng::{AddDataResult, DecodeResult, Image};
+use parng::{Adam7Scanlines, AddDataResult, DecodeResult, Image, LevelOfDetail};
 use std::fs::File;
 use std::io::{BufWriter, Cursor, Read, Write};
 
@@ -30,16 +30,68 @@ fn main() {
     while let AddDataResult::Continue = image.add_data(&mut input_buffer).unwrap() {}
 
     let dimensions = image.metadata().as_ref().unwrap().dimensions;
+    let color_depth = image.metadata().as_ref().unwrap().color_depth;
 
     let mut pixels = vec![];
-    pixels.reserve((dimensions.width as usize) * (dimensions.height as usize) * 4);
+    let mut interlaced_pixels = [vec![], vec![], vec![], vec![], vec![], vec![], vec![]];
+    let stride = dimensions.height as usize * 4;
+    pixels.reserve((dimensions.width as usize) * stride);
 
     let before = time::precise_time_ns();
     for y in 0..dimensions.height {
         loop {
             while let AddDataResult::Continue = image.add_data(&mut input_buffer).unwrap() {}
             match image.decode().unwrap() {
-                DecodeResult::Scanline(scanline) => {
+                DecodeResult::Scanline(scanline, LevelOfDetail::Adam7(lod)) => {
+                    interlaced_pixels[lod as usize].extend_from_slice(&scanline[..]);
+                    if lod == 6 && interlaced_pixels[6].len() >= stride * 4 {
+                        // FIXME(pcwalton): Do this in a separate thread for parallelism.
+                        //
+                        // TODO(pcwalton): Figure out a nice way to expose this in the API. The
+                        // low-level control philosophy of parng has jumped the shark at this
+                        // point.
+                        let scanlines = Adam7Scanlines {
+                            lod0: [&interlaced_pixels[0][..]],
+                            lod1: Some([&interlaced_pixels[1][..]]),
+                            lod2: Some([&interlaced_pixels[2][..]]),
+                            lod3: Some([
+                                &interlaced_pixels[3][0..(stride / 2)],
+                                &interlaced_pixels[3][(stride / 2)..stride],
+                            ]),
+                            lod4: Some([
+                                &interlaced_pixels[4][0..(stride / 2)],
+                                &interlaced_pixels[4][(stride / 2)..stride],
+                            ]),
+                            lod5: Some([
+                                &interlaced_pixels[5][0..(stride / 2)],
+                                &interlaced_pixels[5][(stride / 2)..stride],
+                                &interlaced_pixels[5][stride..(stride * 3 / 2)],
+                                &interlaced_pixels[5][(stride * 3 / 2)..],
+                            ]),
+                            lod6: Some([
+                                &interlaced_pixels[6][0..(stride / 2)],
+                                &interlaced_pixels[6][(stride / 2)..stride],
+                                &interlaced_pixels[6][stride..(stride * 3 / 2)],
+                                &interlaced_pixels[6][(stride * 3 / 2)..],
+                            ]),
+                            lod7: Some([
+                                &interlaced_pixels[7][0..stride],
+                                &interlaced_pixels[7][stride..stride * 2],
+                                &interlaced_pixels[7][stride * 2..stride * 3],
+                                &interlaced_pixels[7][stride * 3..],
+                            ]),
+                        };
+
+                        let original_length = pixels.len();
+                        pixels.resize(original_length + stride, 0);
+                        parng::deinterlace_adam7(&mut pixels[original_length..],
+                                                 &scanlines,
+                                                 dimensions.width,
+                                                 color_depth);
+                    }
+                    break
+                }
+                DecodeResult::Scanline(scanline, LevelOfDetail::None) => {
                     pixels.extend_from_slice(&scanline[..]);
                     break
                 }

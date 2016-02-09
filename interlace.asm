@@ -2,19 +2,19 @@
 
 bits 64
 
-global parng_deinterlace_scanline_04
-global parng_deinterlace_scanline_26
+global parng_deinterlace_adam7_scanline_04
+global parng_deinterlace_adam7_scanline_26
 
-; parng_deinterlace_scanline_04(uint8x4 *dest,  /* rdi */
-;                               uint8x4 *lod0,  /* rsi; must not be null */
-;                               uint8x4 *lod1,  /* rdx; can be null */
-;                               uint8x4 *lod3,  /* rcx; can be null */
-;                               uint8x4 *lod5,  /* r8; can be null */
-;                               uint64_t width) /* r9 */
+; parng_deinterlace_adam7_scanline_04(uint8x4 *dest,  /* rdi */
+;                                     uint8x4 *lod0,  /* rsi; must not be null */
+;                                     uint8x4 *lod1,  /* rdx; can be null */
+;                                     uint8x4 *lod3,  /* rcx; can be null */
+;                                     uint8x4 *lod5,  /* r8; can be null */
+;                                     uint64_t width) /* r9 */
 ;
 ; TODO(pcwalton): Try specializing this to eliminate the branches.
 ; TODO(pcwalton): A version of this specialized for scanline 4 would be slightly cheaper.
-parng_deinterlace_scanline_04:
+parng_deinterlace_adam7_scanline_04:
     xorps xmm0,xmm0             ; xmm0 = 0
     xorps xmm1,xmm1             ; xmm1 = 0
     xorps xmm2,xmm2             ; xmm2 = 0
@@ -54,8 +54,8 @@ parng_deinterlace_scanline_04:
     jb .loop
     ret
 
-; parng_deinterlace_scanline_26(uint8x4 *dest, uint8x4 *lod4, uint8x4 *lod5, uint64_t width)
-parng_deinterlace_scanline_26:
+; parng_deinterlace_adam7_scanline_26(uint8x4 *dest, uint8x4 *lod4, uint8x4 *lod5, uint64_t width)
+parng_deinterlace_adam7_scanline_26:
     test rdx,rdx                ; lod5 == null?
     cmove rdx,rsi               ; if so, lod5 = lod4
     xor rax,rax

@@ -30,7 +30,7 @@ parng_deinterlace_adam7_scanline_04:
     test rcx,rcx                ; lod3 == null?
     je .lod3_not_present
     pinsrd xmm0,[rcx],1         ; xmm0 = [ undef, undef, lod3[0], lod0[0] ]
-    pinsrd xmm0,[rcx+4],1       ; xmm1 = [ undef, undef, lod3[1], lod1[0] ]
+    pinsrd xmm1,[rcx+4],1       ; xmm1 = [ undef, undef, lod3[1], lod1[0] ]
     add rcx,8
     jmp .lod3_finished
 .lod3_not_present:

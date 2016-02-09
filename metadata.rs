@@ -5,7 +5,7 @@
 use PngError;
 use byteorder::{self, ReadBytesExt, BigEndian};
 use num::ToPrimitive;
-use std::io::BufRead;
+use std::io::Read;
 
 /// Represents image dimensions in pixels.
 ///
@@ -152,7 +152,7 @@ pub struct ChunkHeader {
 }
 
 impl ChunkHeader {
-    pub fn load<R: ?Sized + BufRead>(reader: &mut R) -> Result<ChunkHeader,PngError> {
+    pub fn load<R: ?Sized + Read>(reader: &mut R) -> Result<ChunkHeader,PngError> {
         // chunk length
         let length = try!(reader.read_u32::<BigEndian>()
                                 .map_byteorder_error("when reading chunk length"));
@@ -186,7 +186,7 @@ pub struct Metadata {
 }
 
 impl Metadata {
-    pub fn load<R: ?Sized + BufRead>(r: &mut R) -> Result<Metadata,PngError> {
+    pub fn load<R: ?Sized + Read>(r: &mut R) -> Result<Metadata,PngError> {
         let mut signature = [0u8; 8];
         try!(r.read_exact(&mut signature).map_err(|_| format_eof("when reading PNG signature")));
 

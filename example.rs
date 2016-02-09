@@ -7,9 +7,10 @@ extern crate time;
 
 use byteorder::{LittleEndian, WriteBytesExt};
 use clap::{App, Arg};
-use parng::{Adam7Scanlines, AddDataResult, DecodeResult, Image, LevelOfDetail};
+use parng::interlacing::{self, Adam7Scanlines, LevelOfDetail};
+use parng::{AddDataResult, DecodeResult, Image};
 use std::fs::File;
-use std::io::{BufWriter, Cursor, Read, Write};
+use std::io::{BufWriter, Write};
 
 const BPP: u32 = 4;
 
@@ -22,12 +23,8 @@ fn main() {
     let out_path = matches.value_of("OUTPUT").unwrap();
 
     let mut input = File::open(in_path).unwrap();
-    let mut input_buffer = vec![];
-    input.read_to_end(&mut input_buffer).unwrap();
-
     let mut image = Image::new().unwrap();
-    let mut input_buffer = Cursor::new(&input_buffer[..]);
-    while let AddDataResult::Continue = image.add_data(&mut input_buffer).unwrap() {}
+    while let AddDataResult::Continue = image.add_data(&mut input).unwrap() {}
 
     let dimensions = image.metadata().as_ref().unwrap().dimensions;
     let color_depth = image.metadata().as_ref().unwrap().color_depth;
@@ -40,7 +37,7 @@ fn main() {
     let before = time::precise_time_ns();
     'outer: loop {
         loop {
-            match image.add_data(&mut input_buffer).unwrap() {
+            match image.add_data(&mut input).unwrap() {
                 AddDataResult::Continue => {}
                 AddDataResult::BufferFull => break,
                 AddDataResult::Finished => break 'outer,
@@ -98,10 +95,10 @@ fn main() {
                                 ]),
                             };
 
-                            parng::deinterlace_adam7(&mut pixels[original_length..],
-                                                     &scanlines,
-                                                     dimensions.width,
-                                                     color_depth);
+                            interlacing::deinterlace_adam7(&mut pixels[original_length..],
+                                                           &scanlines,
+                                                           dimensions.width,
+                                                           color_depth);
                         }
 
                         // FIXME(pcwalton): Hideously inefficient.

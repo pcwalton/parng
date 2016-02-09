@@ -29,12 +29,13 @@ fn main() {
     let dimensions = image.metadata().as_ref().unwrap().dimensions;
     let color_depth = image.metadata().as_ref().unwrap().color_depth;
 
+    let before = time::precise_time_ns();
+
     let mut pixels = vec![];
     let mut interlaced_pixels = [vec![], vec![], vec![], vec![], vec![], vec![], vec![]];
     let stride = dimensions.width as usize * 4;
     pixels.reserve((dimensions.height as usize) * stride);
 
-    let before = time::precise_time_ns();
     'outer: loop {
         loop {
             match image.add_data(&mut input).unwrap() {

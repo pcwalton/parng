@@ -74,9 +74,10 @@ impl Image {
     pub fn add_data<R>(&mut self, reader: &mut R) -> Result<AddDataResult,PngError>
                        where R: Read + Seek {
         loop {
-            let initial_pos = try!(reader.seek(SeekFrom::Current(0)).map_err(PngError::Io));
             match self.decode_state {
                 DecodeState::Start => {
+                    let initial_pos =
+                        try!(reader.seek(SeekFrom::Current(0)).map_err(PngError::Io));
                     match Metadata::load(reader) {
                         Ok(metadata) => {
                             self.current_lod = match metadata.interlace_method {
@@ -95,6 +96,8 @@ impl Image {
                     }
                 }
                 DecodeState::LookingForImageData => {
+                    let initial_pos =
+                        try!(reader.seek(SeekFrom::Current(0)).map_err(PngError::Io));
                     let chunk_header = match ChunkHeader::load(reader) {
                         Err(PngError::NeedMoreData) => {
                             try!(reader.seek(SeekFrom::Start(initial_pos)).map_err(PngError::Io));

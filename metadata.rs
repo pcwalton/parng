@@ -3,9 +3,12 @@
 //! This code is derived from code in the `immeta` library: https://github.com/netvl/immeta
 
 use PngError;
-use byteorder::{self, ReadBytesExt, BigEndian};
+use byteorder::{self, BigEndian, ByteOrder, ReadBytesExt};
 use num::ToPrimitive;
 use std::io::Read;
+
+// 8 for the header; 12 for the chunk info (including CRC); 13 for the header.
+const METADATA_SIZE: usize = 8 + 12 + 13;
 
 /// Represents image dimensions in pixels.
 ///
@@ -153,17 +156,11 @@ pub struct ChunkHeader {
 
 impl ChunkHeader {
     pub fn load<R: ?Sized + Read>(reader: &mut R) -> Result<ChunkHeader,PngError> {
-        // chunk length
-        let length = try!(reader.read_u32::<BigEndian>()
-                                .map_byteorder_error("when reading chunk length"));
-        
-        let mut chunk_type = [0u8; 4];
-        try!(reader.read_exact(&mut chunk_type)
-                   .map_err(|_| format_eof("when reading chunk type")));
-
+        let mut buffer = [0; 8];
+        try!(reader.read_exact(&mut buffer).map_err(|_| format_eof("when reading chunk data")));
         Ok(ChunkHeader {
-            length: length,
-            chunk_type: chunk_type,
+            length: BigEndian::read_u32(&buffer[0..4]),
+            chunk_type: [buffer[4], buffer[5], buffer[6], buffer[7]],
         })
     }
 }
@@ -187,6 +184,10 @@ pub struct Metadata {
 
 impl Metadata {
     pub fn load<R: ?Sized + Read>(r: &mut R) -> Result<Metadata,PngError> {
+        let mut buffer = [0u8; METADATA_SIZE];
+        try!(r.read_exact(&mut buffer).map_err(|_| format_eof("when reading metadata")));
+        let mut r = &buffer[..];
+
         let mut signature = [0u8; 8];
         try!(r.read_exact(&mut signature).map_err(|_| format_eof("when reading PNG signature")));
 
@@ -195,7 +196,7 @@ impl Metadata {
         }
 
         // chunk length
-        let chunk_header = try!(ChunkHeader::load(r));
+        let chunk_header = try!(ChunkHeader::load(&mut r));
         if &chunk_header.chunk_type != b"IHDR" {
             return Err(PngError::InvalidMetadata(format!("invalid PNG chunk: {:?}",
                                                          chunk_header.chunk_type)));

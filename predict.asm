@@ -193,6 +193,20 @@ parng_predict_scanline_average_24bpp:
 ; Register inputs: xmm0 = a (16-bit), xmm2 = c (16-bit), xmm10 = 64bpp → 32bpp shuffle mask
 ; Register outputs: xmm0 = next a (16-bit), xmm2 = next c (16-bit)
 ; Register clobbers: xmm1, xmm3, xmm4, xmm5, xmm6, xmm7, xmm8
+;
+; This is based on the spec'd Paeth filter, optimized using the STOKE superoptimizer and manually
+; cleaned up.
+;
+; See the public domain code here for a completely different algorithm:
+; https://github.com/kobalicek/simdtests/blob/master/depng/depng_sse2.cpp
+;
+; That code is shorter in instruction count but depends on a division by 3, which requires the
+; high-latency `pmulhw` instruction (5 cycles on Haswell). It's worth possibly switching to if the
+; latency on that instruction goes down.
+;
+; The main trick here is to use `pmaxsw` on a combination of values and Boolean results, keeping in
+; mind that true in SSE is represented as -1 and all of our other values at that point are
+; nonnegative.
 %macro predict_pixels_paeth 3
     pmovzxbw xmm1,%3            ; xmm1 = b (16-bit)
 
@@ -220,20 +234,6 @@ parng_predict_scanline_average_24bpp:
 %endmacro
 
 ; parng_predict_scanline_paeth_32bpp(uint8x4 *dest, uint8x4 *src, uint8x4 *prev, uint64_t width)
-;
-; This is based on the spec'd Paeth filter, optimized using the STOKE superoptimizer and manually
-; cleaned up.
-;
-; See the public domain code here for a completely different algorithm:
-; https://github.com/kobalicek/simdtests/blob/master/depng/depng_sse2.cpp
-;
-; That code is shorter in instruction count but depends on a division by 3, which requires the
-; high-latency `pmulhw` instruction (5 cycles on Haswell). It's worth possibly switching to if the
-; latency on that instruction goes down.
-;
-; The main trick here is to use `pmaxsw` on a combination of values and Boolean results, keeping in
-; mind that true in SSE is represented as -1 and all of our other values at that point are
-; nonnegative.
 parng_predict_scanline_paeth_32bpp:
     xorps xmm0,xmm0             ; xmm0 = a = 0
     xorps xmm2,xmm2             ; xmm2 = c = 0
@@ -247,20 +247,6 @@ parng_predict_scanline_paeth_32bpp:
     ret
 
 ; parng_predict_scanline_paeth_24bpp(uint8x4 *dest, uint8x3 *src, uint8x4 *prev, uint64_t width)
-;
-; This is based on the spec'd Paeth filter, optimized using the STOKE superoptimizer and manually
-; cleaned up.
-;
-; See the public domain code here for a completely different algorithm:
-; https://github.com/kobalicek/simdtests/blob/master/depng/depng_sse2.cpp
-;
-; That code is shorter in instruction count but depends on a division by 3, which requires the
-; high-latency `pmulhw` instruction (5 cycles on Haswell). It's worth possibly switching to if the
-; latency on that instruction goes down.
-;
-; The main trick here is to use `pmaxsw` on a combination of values and Boolean results, keeping in
-; mind that true in SSE is represented as -1 and all of our other values at that point are
-; nonnegative.
 parng_predict_scanline_paeth_24bpp:
     xorps xmm0,xmm0             ; xmm0 = a = 0
     xorps xmm2,xmm2             ; xmm2 = c = 0

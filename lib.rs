@@ -413,22 +413,24 @@ impl Predictor {
     }
 
     fn accelerated_predict(self,
-                           this: &mut [u8],
+                           dest: &mut [u8],
+                           src: &[u8],
                            prev: &[u8],
                            width: u32,
                            color_depth: u8) {
-        debug_assert!(((this.as_ptr() as usize) & 0xf) == 0);
+        debug_assert!(((dest.as_ptr() as usize) & 0xf) == 0);
+        debug_assert!(((src.as_ptr() as usize) & 0xf) == 0);
         debug_assert!(((prev.as_ptr() as usize) & 0xf) == 0);
 
         let decode_scanline = match self {
             Predictor::None => return,
-            Predictor::Left => parng_predict_scanline_left,
-            Predictor::Up => parng_predict_scanline_up,
-            Predictor::Average => parng_predict_scanline_average,
-            Predictor::Paeth => parng_predict_scanline_paeth,
+            Predictor::Left => parng_predict_scanline_left_32bpp,
+            Predictor::Up => parng_predict_scanline_up_32bpp,
+            Predictor::Average => parng_predict_scanline_average_32bpp,
+            Predictor::Paeth => parng_predict_scanline_paeth_32bpp,
         };
         unsafe {
-            decode_scanline(this.as_mut_ptr(), prev.as_ptr(), width as u64)
+            decode_scanline(dest.as_mut_ptr(), src.as_ptr(), prev.as_ptr(), width as u64)
         }
     }
 }
@@ -473,6 +475,7 @@ pub enum DecodeResult<'a> {
 fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
                     receiver: Receiver<MainThreadToPredictorThreadMsg>) {
     let mut prev = vec![];
+    let mut dest = vec![];
     while let Ok(msg) = receiver.recv() {
         match msg {
             MainThreadToPredictorThreadMsg::Predict(width,
@@ -491,10 +494,16 @@ fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
                 }
                 let prev_offset = aligned_offset_for_slice(&prev[..]);
 
+                while dest.len() < stride + 32 {
+                    dest.push(0)
+                }
+                let dest_offset = aligned_offset_for_slice(&dest[..]);
+
                 match predictor {
                     Predictor::None | Predictor::Left | Predictor::Up | Predictor::Paeth |
                     Predictor::Average => {
-                        predictor.accelerated_predict(&mut scanline[scanline_offset..],
+                        predictor.accelerated_predict(&mut dest[dest_offset..],
+                                                      &scanline[scanline_offset..],
                                                       &prev[prev_offset..],
                                                       width,
                                                       color_depth)
@@ -502,8 +511,9 @@ fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
                 }
                 // FIXME(pcwalton): Any way to avoid this copy?
                 prev[prev_offset..(prev_offset + stride)].clone_from_slice(
-                    &mut scanline[scanline_offset..(scanline_offset + stride)]);
-                sender.send(PredictorThreadToMainThreadMsg(scanline, scanline_lod)).unwrap()
+                    &mut dest[dest_offset..(dest_offset + stride)]);
+                sender.send(PredictorThreadToMainThreadMsg(dest, scanline_lod)).unwrap();
+                dest = scanline
             }
         }
     }
@@ -517,9 +527,18 @@ unsafe fn inflateInit(strm: *mut z_stream) -> c_int {
 
 #[link(name="parngacceleration")]
 extern {
-    fn parng_predict_scanline_left(this: *mut u8, prev: *const u8, width: u64);
-    fn parng_predict_scanline_up(this: *mut u8, prev: *const u8, width: u64);
-    fn parng_predict_scanline_average(this: *mut u8, prev: *const u8, width: u64);
-    fn parng_predict_scanline_paeth(this: *mut u8, prev: *const u8, width: u64);
+    fn parng_predict_scanline_left_32bpp(dest: *mut u8,
+                                         src: *const u8,
+                                         prev: *const u8,
+                                         width: u64);
+    fn parng_predict_scanline_up_32bpp(dest: *mut u8, src: *const u8, prev: *const u8, width: u64);
+    fn parng_predict_scanline_average_32bpp(dest: *mut u8,
+                                            src: *const u8,
+                                            prev: *const u8,
+                                            width: u64);
+    fn parng_predict_scanline_paeth_32bpp(dest: *mut u8,
+                                          src: *const u8,
+                                          prev: *const u8,
+                                          width: u64);
 }
 

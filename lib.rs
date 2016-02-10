@@ -195,10 +195,7 @@ impl Image {
                         DecodeState::DecodingData(bytes_left_in_chunk_after_read)
                     }
                 }
-                DecodeState::Finished => {
-                    //println!("Finished!");
-                    return Ok(AddDataResult::Finished)
-                }
+                DecodeState::Finished => return Ok(AddDataResult::Finished),
             }
         }
     }
@@ -256,7 +253,7 @@ impl Image {
         match result {
             Some((result_buffer, result_lod)) => {
                 self.scanline_data_buffer = result_buffer;
-                let stride = self.stride_for_lod(result_lod);
+                let stride = self.stride_for_lod_and_color_depth(result_lod, 32);
                 let offset = self.aligned_scanline_buffer_offset();
                 Ok(DecodeResult::Scanline(
                         &mut self.scanline_data_buffer[offset..(offset + stride as usize)],
@@ -350,7 +347,7 @@ impl Predictor {
     }
 
     fn predict(self, dest: &mut [u8], src: &[u8], prev: &[u8], width: u32, color_depth: u8) {
-        let color_depth = color_depth as usize;
+        let color_depth = (color_depth / 8) as usize;
         let mut a: [u8; 4] = [0; 4];
         let mut c: [u8; 4] = [0; 4];
         match self {

@@ -6,6 +6,7 @@ use std::ptr;
 pub trait LodDimensionQuery {
     fn width_for_lod(&self, lod: LevelOfDetail) -> u32;
     fn height_for_lod(&self, lod: LevelOfDetail) -> u32;
+    fn stride_for_lod_and_color_depth(&self, lod: LevelOfDetail, color_depth: u8) -> u32;
     fn stride_for_lod(&self, lod: LevelOfDetail) -> u32;
 }
 
@@ -32,6 +33,10 @@ impl LodDimensionQuery for Image {
             LevelOfDetail::Adam7(5) => image_height / 2,
             _ => image_height,
         }
+    }
+
+    fn stride_for_lod_and_color_depth(&self, lod: LevelOfDetail, color_depth: u8) -> u32 {
+        self.width_for_lod(lod) * ((color_depth / 8) as u32)
     }
 
     fn stride_for_lod(&self, lod: LevelOfDetail) -> u32 {

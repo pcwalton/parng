@@ -11,8 +11,9 @@ use parng::interlacing::{self, Adam7Scanlines, LevelOfDetail};
 use parng::{AddDataResult, DecodeResult, Image};
 use std::fs::File;
 use std::io::{BufWriter, Write};
+use std::ptr;
 
-const BPP: u32 = 4;
+const OUTPUT_BPP: u32 = 4;
 
 fn main() {
     let matches = App::new("example").arg(Arg::with_name("INPUT").required(true))
@@ -36,20 +37,16 @@ fn main() {
     let stride = dimensions.width as usize * 4;
     pixels.reserve((dimensions.height as usize) * stride);
 
-    'outer: loop {
-        loop {
-            match image.add_data(&mut input).unwrap() {
-                AddDataResult::Continue => {}
-                AddDataResult::BufferFull => break,
-                AddDataResult::Finished => break 'outer,
-            }
-        }
-
+    let mut y = 0;
+    while y < dimensions.height {
+        while let AddDataResult::Continue = image.add_data(&mut input).unwrap() {}
         match image.decode().unwrap() {
             DecodeResult::Scanline(scanline, LevelOfDetail::Adam7(lod)) => {
                 //println!("got scanline with LOD {:?}", lod);
                 interlaced_pixels[lod as usize].extend_from_slice(&scanline[..]);
                 if lod == 6 && interlaced_pixels[6].len() >= stride * 4 {
+                    y += 8;
+
                     // FIXME(pcwalton): Do this in a separate thread for parallelism.
                     //
                     // TODO(pcwalton): Figure out a nice way to expose this in the API. The
@@ -102,11 +99,13 @@ fn main() {
                                                            color_depth);
                         }
 
-                        // FIXME(pcwalton): Hideously inefficient.
+                        // FIXME(pcwalton): Terrible.
                         for (buffer, &length) in interlaced_pixels.iter_mut().zip(lengths.iter()) {
                             let original_length = buffer.len();
-                            for i in 0..(original_length - length) {
-                                buffer[i] = buffer[length + i]
+                            unsafe {
+                                ptr::copy(buffer.as_mut_ptr().offset(length as isize),
+                                          buffer.as_mut_ptr(),
+                                          original_length - length);
                             }
                             buffer.truncate(original_length - length);
                         }
@@ -120,6 +119,7 @@ fn main() {
                 }
             }
             DecodeResult::Scanline(scanline, LevelOfDetail::None) => {
+                y += 1;
                 pixels.extend_from_slice(&scanline[..]);
             }
             DecodeResult::None => {}
@@ -139,7 +139,7 @@ fn main() {
     for y in 0..dimensions.height {
         let y = dimensions.height - y - 1;
         for x in 0..dimensions.width {
-            let start = (((y * dimensions.width) + x) * BPP) as usize;
+            let start = (((y * dimensions.width) + x) * OUTPUT_BPP) as usize;
             output.write_all(&[pixels[start + 2], pixels[start + 1], pixels[start]]).unwrap();
         }
     }

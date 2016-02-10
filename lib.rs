@@ -348,49 +348,54 @@ impl Predictor {
         }
     }
 
-    // FIXME(pcwalton): Clamp `this` and `prev` appropriately based on the stride.
-    // FIXME(pcwalton): `a` and `c` are unnecessary.
-    // TODO(pcwalton): Support arbitrary color depths.
-    fn predict(self,
-               this: &mut [u8],
-               prev: &[u8],
-               width: u32,
-               color_depth: u8,
-               mut a: [u8; 4],
-               mut c: [u8; 4]) {
-        debug_assert!(color_depth == 32);
+    fn predict(self, dest: &mut [u8], src: &[u8], prev: &[u8], width: u32, color_depth: u8) {
+        let color_depth = color_depth as usize;
+        let mut a: [u8; 4] = [0; 4];
+        let mut c: [u8; 4] = [0; 4];
         match self {
-            Predictor::None => {}
+            Predictor::None => {
+                for (dest, src) in dest.chunks_mut(4).zip(src.chunks(color_depth)) {
+                    for (dest, src) in dest.iter_mut().zip(src.iter()) {
+                        *dest = *src
+                    }
+                }
+            }
             Predictor::Left => {
-                for this in this.chunks_mut(4) {
-                    for (this, a) in this.iter_mut().zip(a.iter_mut()) {
-                        *a = this.wrapping_add(*a);
-                        *this = *a
+                for (dest, src) in dest.chunks_mut(4).zip(src.chunks(color_depth)) {
+                    for (dest, (src, a)) in dest.iter_mut().zip(src.iter().zip(a.iter_mut())) {
+                        *a = src.wrapping_add(*a);
+                        *dest = *a
                     }
                 }
             }
             Predictor::Up => {
-                for (this, b) in this.iter_mut().zip(prev.iter()) {
-                    *this = this.wrapping_add(*b)
+                for (dest, (src, b)) in dest.chunks_mut(4).zip(src.chunks(color_depth)
+                                                                  .zip(prev.chunks(4))) {
+                    for (dest, (src, b)) in dest.iter_mut().zip(src.iter().zip(b.iter())) {
+                        *dest = src.wrapping_add(*b)
+                    }
                 }
             }
             Predictor::Average => {
-                for (this, b) in this.chunks_mut(4).zip(prev.chunks(4)) {
-                    for (this, (b, a)) in this.iter_mut().zip(b.iter().zip(a.iter_mut())) {
-                        *a = this.wrapping_add((((*a as u16) + (*b as u16)) / 2) as u8);
-                        *this = *a
+                for (dest, (src, b)) in dest.chunks_mut(4).zip(src.chunks(color_depth)
+                                                                  .zip(prev.chunks(4))) {
+                    for (dest, (src, (b, a))) in
+                            dest.iter_mut().zip(src.iter().zip(b.iter().zip(a.iter_mut()))) {
+                        *a = src.wrapping_add((((*a as u16) + (*b as u16)) / 2) as u8);
+                        *dest = *a
                     }
                 }
             }
             Predictor::Paeth => {
-                for (this, b) in this.chunks_mut(4).zip(prev.chunks(4)) {
-                    for (a, (b, (c, this))) in a.iter_mut()
-                                                .zip(b.iter()
-                                                      .zip(c.iter_mut().zip(this.iter_mut()))) {
+                for (dest, (src, b)) in dest.chunks_mut(4).zip(src.chunks(color_depth)
+                                                                  .zip(prev.chunks(4))) {
+                    for (a, (b, (c, (dest, src)))) in
+                        a.iter_mut().zip(b.iter().zip(c.iter_mut()
+                                                       .zip(dest.iter_mut().zip(src.iter())))) {
                         let paeth = paeth(*a, *b, *c);
-                        *a = this.wrapping_add(paeth);
+                        *a = src.wrapping_add(paeth);
                         *c = *b;
-                        *this = *a;
+                        *dest = *a;
                     }
                 }
             }
@@ -421,13 +426,23 @@ impl Predictor {
         debug_assert!(((dest.as_ptr() as usize) & 0xf) == 0);
         debug_assert!(((src.as_ptr() as usize) & 0xf) == 0);
         debug_assert!(((prev.as_ptr() as usize) & 0xf) == 0);
+        debug_assert!(color_depth == 32 || color_depth == 24);
 
-        let decode_scanline = match self {
-            Predictor::None => return,
-            Predictor::Left => parng_predict_scanline_left_32bpp,
-            Predictor::Up => parng_predict_scanline_up_32bpp,
-            Predictor::Average => parng_predict_scanline_average_32bpp,
-            Predictor::Paeth => parng_predict_scanline_paeth_32bpp,
+        let decode_scanline = match (self, color_depth) {
+            (Predictor::None, 32) => return,
+            (Predictor::None, _) => {
+                // FIXME(pcwalton): Implement this!
+                panic!("None predictor only supported with 32 BPP!")
+            }
+            (Predictor::Left, 32) => parng_predict_scanline_left_32bpp,
+            (Predictor::Left, 24) => parng_predict_scanline_left_24bpp,
+            (Predictor::Up, 32) => parng_predict_scanline_up_32bpp,
+            (Predictor::Up, 24) => parng_predict_scanline_up_24bpp,
+            (Predictor::Average, 32) => parng_predict_scanline_average_32bpp,
+            (Predictor::Average, 24) => parng_predict_scanline_average_24bpp,
+            (Predictor::Paeth, 32) => parng_predict_scanline_paeth_32bpp,
+            (Predictor::Paeth, 24) => parng_predict_scanline_paeth_24bpp,
+            _ => panic!("Unsupported predictor/color depth combination!"),
         };
         unsafe {
             decode_scanline(dest.as_mut_ptr(), src.as_ptr(), prev.as_ptr(), width as u64)
@@ -485,7 +500,7 @@ fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
                                                     scanline_offset,
                                                     scanline_lod) => {
                 //println!("Predict(scanline_offset={})", scanline_offset);
-                let stride = (width as usize) * (color_depth as usize / 8);
+                let stride = (width as usize) * 4;
 
                 // Pad out to 32 bytes. This should be enough to handle any amount of padding at
                 // both the beginning and end.
@@ -531,12 +546,25 @@ extern {
                                          src: *const u8,
                                          prev: *const u8,
                                          width: u64);
+    fn parng_predict_scanline_left_24bpp(dest: *mut u8,
+                                         src: *const u8,
+                                         prev: *const u8,
+                                         width: u64);
     fn parng_predict_scanline_up_32bpp(dest: *mut u8, src: *const u8, prev: *const u8, width: u64);
+    fn parng_predict_scanline_up_24bpp(dest: *mut u8, src: *const u8, prev: *const u8, width: u64);
     fn parng_predict_scanline_average_32bpp(dest: *mut u8,
                                             src: *const u8,
                                             prev: *const u8,
                                             width: u64);
+    fn parng_predict_scanline_average_24bpp(dest: *mut u8,
+                                            src: *const u8,
+                                            prev: *const u8,
+                                            width: u64);
     fn parng_predict_scanline_paeth_32bpp(dest: *mut u8,
+                                          src: *const u8,
+                                          prev: *const u8,
+                                          width: u64);
+    fn parng_predict_scanline_paeth_24bpp(dest: *mut u8,
                                           src: *const u8,
                                           prev: *const u8,
                                           width: u64);

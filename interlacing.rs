@@ -79,9 +79,9 @@ pub fn deinterlace_adam7(out_scanlines: &mut [u8],
                                                      width,
                                                      color_depth).as_mut_ptr(),
                                                 in_scanlines.lod2.as_opt_ptr(0),
-                                                in_scanlines.lod2.as_opt_ptr(0),
+                                                in_scanlines.lod2.as_opt_ptr(0).offset(4),
                                                 in_scanlines.lod3.as_opt_ptr(1),
-                                                in_scanlines.lod5.as_opt_ptr(1),
+                                                in_scanlines.lod5.as_opt_ptr(2),
                                                 width as u64);
 
             if in_scanlines.lod4.is_some() {
@@ -90,14 +90,14 @@ pub fn deinterlace_adam7(out_scanlines: &mut [u8],
                                                          width,
                                                          color_depth).as_mut_ptr(),
                                                     in_scanlines.lod4.as_opt_ptr(0),
-                                                    in_scanlines.lod5.as_opt_ptr(0),
+                                                    in_scanlines.lod5.as_opt_ptr(1),
                                                     width as u64);
                 parng_deinterlace_adam7_scanline_26(dest(out_scanlines,
-                                                         2,
+                                                         6,
                                                          width,
                                                          color_depth).as_mut_ptr(),
                                                     in_scanlines.lod4.as_opt_ptr(1),
-                                                    in_scanlines.lod5.as_opt_ptr(1),
+                                                    in_scanlines.lod5.as_opt_ptr(3),
                                                     width as u64);
 
                 match in_scanlines.lod6 {

@@ -72,8 +72,8 @@ fn main() {
                                 lod1: Some([&interlaced_pixels[1][..]]),
                                 lod2: Some([&interlaced_pixels[2][..]]),
                                 lod3: Some([
-                                    &interlaced_pixels[3][0..(stride / 2)],
-                                    &interlaced_pixels[3][(stride / 2)..stride],
+                                    &interlaced_pixels[3][0..(stride / 4)],
+                                    &interlaced_pixels[3][(stride / 4)..(stride / 2)],
                                 ]),
                                 lod4: Some([
                                     &interlaced_pixels[4][0..(stride / 2)],

@@ -54,15 +54,18 @@ parng_deinterlace_adam7_scanline_04:
     jb .loop
     ret
 
-; parng_deinterlace_adam7_scanline_26(uint8x4 *dest, uint8x4 *lod4, uint8x4 *lod5, uint64_t width)
+; parng_deinterlace_adam7_scanline_26(uint8x4 *dest, /* rdi */
+;                                     uint8x4 *lod4, /* rsi */
+;                                     uint8x4 *lod5, /* rdx */
+;                                     uint64_t width) /* rcx */
 parng_deinterlace_adam7_scanline_26:
     test rdx,rdx                    ; lod5 == null?
     cmove rdx,rsi                   ; if so, lod5 = lod4
     xor rax,rax
 .loop:
-    movdqa xmm1,[rsi+rax*4]         ; xmm1 = [ lod4[3], lod4[2], lod4[1], lod4[0] ]
-    vunpcklps xmm0,xmm1,[rdx+rax*4] ; xmm0 = [ lod5[1], lod4[1], lod5[0], lod4[0] ]
-    unpckhps xmm1,[rdx+rax*4]       ; xmm1 = [ lod5[3], lod4[3], lod5[2], lod4[2] ]
+    movdqa xmm1,[rsi+rax*2]         ; xmm1 = [ lod4[3], lod4[2], lod4[1], lod4[0] ]
+    vunpcklps xmm0,xmm1,[rdx+rax*2] ; xmm0 = [ lod5[1], lod4[1], lod5[0], lod4[0] ]
+    unpckhps xmm1,[rdx+rax*2]       ; xmm1 = [ lod5[3], lod4[3], lod5[2], lod4[2] ]
     movdqa [rdi+rax*4],xmm0         ; write pixels [0..4)
     movdqa [rdi+rax*4+16],xmm1      ; write pixels [4..8)
     add rax,8

@@ -24,15 +24,15 @@ parng_deinterlace_adam7_scanline_04:
     xor r10,r10
 .loop:
     movd xmm0,[rsi+rax]         ; xmm0 = [ undef, undef, undef, lod0[0] ]
-    movd xmm1,[rdx+rax]         ; xmm1 = [ undef, undef, undef, lod1[0] ]
+    pinsrd xmm1,[rdx+rax],2     ; xmm1 = [ undef, lod1[0], undef, undef ]
     test rcx,rcx                ; lod3 == null?
     je .lod3_not_present
     pinsrd xmm0,[rcx+rax*2],1   ; xmm0 = [ undef, undef, lod3[0], lod0[0] ]
-    pinsrd xmm1,[rcx+rax*2+4],1 ; xmm1 = [ undef, undef, lod3[1], lod1[0] ]
+    pinsrd xmm1,[rcx+rax*2+4],3 ; xmm1 = [ lod3[1], lod1[0], undef, undef ]
     jmp .lod3_finished
 .lod3_not_present:
     pinsrd xmm0,r10d,1          ; xmm0 = [ undef, undef, lod3[0], lod0[0] ]
-    pinsrd xmm1,r10d,1          ; xmm1 = [ undef, undef, lod3[0], lod0[0] ]
+    pinsrd xmm1,r10d,3          ; xmm1 = [ lod3[1], lod1[0], undef, undef ]
 .lod3_finished:
     test r8,r8                  ; lod5 == null?
     je .lod5_not_present

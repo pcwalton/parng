@@ -225,13 +225,14 @@ impl Image {
             }
             let predictor_thread_comm = self.predictor_thread_comm.as_mut().unwrap();
 
-            result = if predictor_thread_comm.is_busy {
-                let msg = predictor_thread_comm.receiver.recv().unwrap();
-                Some((msg.0, msg.1))
+            result = if predictor_thread_comm.scanlines_in_progress > 0 {
+                predictor_thread_comm.receiver.try_recv().ok().map(|msg| {
+                    predictor_thread_comm.scanlines_in_progress -= 1;
+                    (msg.0, msg.1)
+                })
             } else {
                 None
             };
-            predictor_thread_comm.is_busy = false;
 
             if let Some((scanline_width, scanline_lod)) =
                     width_and_lod_for_scanline_data_buffer_if_full {
@@ -247,7 +248,7 @@ impl Image {
                     scanline_lod);
                 self.scanline_data_buffer_size = 0;
                 predictor_thread_comm.sender.send(msg).unwrap();
-                predictor_thread_comm.is_busy = true
+                predictor_thread_comm.scanlines_in_progress += 1
             }
             self.scanline_data_buffer_lod = None;
         }
@@ -460,7 +461,7 @@ struct PredictorThreadToMainThreadMsg(Vec<u8>, LevelOfDetail);
 struct MainThreadToPredictorThreadComm {
     sender: Sender<MainThreadToPredictorThreadMsg>,
     receiver: Receiver<PredictorThreadToMainThreadMsg>,
-    is_busy: bool,
+    scanlines_in_progress: u32,
 }
 
 impl MainThreadToPredictorThreadComm {
@@ -476,7 +477,7 @@ impl MainThreadToPredictorThreadComm {
         MainThreadToPredictorThreadComm {
             sender: main_thread_to_predictor_thread_sender,
             receiver: predictor_thread_to_main_thread_receiver,
-            is_busy: false,
+            scanlines_in_progress: 0,
         }
     }
 }

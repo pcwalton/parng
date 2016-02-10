@@ -128,7 +128,6 @@ fn main() {
     pixels.resize((dimensions.height as usize) * stride, 0);   // FIXME(pcwalton)
     println!("Elapsed time: {}ms", (time::precise_time_ns() - before) as f32 / 1_000_000.0);
 
-    /*
     let mut output = BufWriter::new(File::create(out_path).unwrap());
     output.write_all(&[0, 0, 2, 0,
                        0, 0, 0, 0,
@@ -143,6 +142,6 @@ fn main() {
             let start = (((y * dimensions.width) + x) * BPP) as usize;
             output.write_all(&[pixels[start + 2], pixels[start + 1], pixels[start]]).unwrap();
         }
-    }*/
+    }
 }
 

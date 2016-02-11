@@ -100,7 +100,7 @@ parng_predict_scanline_none_strided_32bpp:
 .loop:
     mov r10,[src]
     mov [dest+rax],r10
-    add dest,stride
+    add rax,stride
     add src,4
     cmp rax,length
     jb .loop

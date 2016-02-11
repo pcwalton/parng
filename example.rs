@@ -7,8 +7,8 @@ extern crate time;
 
 use byteorder::{LittleEndian, WriteBytesExt};
 use clap::{App, Arg};
-use parng::interlacing::{self, Adam7Scanlines, LevelOfDetail};
-use parng::{AddDataResult, DataProvider, DecodeResult, Image, UninitializedExtension};
+use parng::{AddDataResult, DataProvider, DecodeResult, Image, InterlacingInfo, LevelOfDetail};
+use parng::{ProvidedScanlines, UninitializedExtension};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::iter;
@@ -24,15 +24,10 @@ struct SlurpingDataProvider {
     data_sender: Sender<Vec<u8>>,
 }
 
-fn aligned_stride(width: u32) -> usize {
-    // FIXME(pcwalton): This doesn't actually align!
-    (width * 4) as usize
-}
-
 impl SlurpingDataProvider {
     #[inline(never)]
     pub fn new(width: u32, height: u32) -> (SlurpingDataProvider, Receiver<Vec<u8>>) {
-        let aligned_stride = aligned_stride(width);
+        let aligned_stride = parng::align(width as usize * 4);
         let (data_sender, data_receiver) = mpsc::channel();
         let length = aligned_stride * (height as usize);
         let mut data = vec![];
@@ -51,24 +46,37 @@ impl SlurpingDataProvider {
 impl DataProvider for SlurpingDataProvider {
     fn read_and_mutate_scanlines<'a>(&'a mut self,
                                      scanline_to_read: Option<u32>,
-                                     scanline_to_mutate: u32)
-                                     -> (Option<&'a [u8]>, &'a mut [u8]) {
+                                     scanline_to_mutate: u32,
+                                     lod: LevelOfDetail)
+                                     -> ProvidedScanlines {
+        let scanline_to_read = scanline_to_read.map(|scanline_to_read| {
+            InterlacingInfo::new(scanline_to_read, lod)
+        });
+        let scanline_to_mutate = InterlacingInfo::new(scanline_to_mutate, lod);
+
         let aligned_stride = self.aligned_stride;
-        let split_point = aligned_stride * (scanline_to_mutate as usize);
+        let split_point = aligned_stride * (scanline_to_mutate.y as usize);
         let (head, tail) = self.data.split_at_mut(split_point);
         let scanline_data_for_reading = match scanline_to_read {
             None => None,
             Some(scanline_to_read) => {
-                let start = (scanline_to_read as usize) * aligned_stride;
+                debug_assert!(scanline_to_mutate.stride == scanline_to_read.stride);
+                let start = (scanline_to_read.y as usize) * aligned_stride +
+                    (scanline_to_read.offset as usize);
                 let end = start + aligned_stride;
                 let slice = &head[start..end];
                 Some(slice)
             }
         };
-        let start = (scanline_to_mutate as usize) * aligned_stride - head.len();
+        let start = (scanline_to_mutate.y as usize) * aligned_stride +
+            (scanline_to_mutate.offset as usize) - head.len();
         let end = start + aligned_stride;
         let scanline_data_for_writing = &mut tail[start..end];
-        (scanline_data_for_reading, scanline_data_for_writing)
+        ProvidedScanlines {
+            scanline_to_read: scanline_data_for_reading,
+            scanline_to_mutate: scanline_data_for_writing,
+            stride: scanline_to_mutate.stride,
+        }
     }
 
     fn extract_data(&mut self) {
@@ -109,6 +117,8 @@ fn main() {
     let in_path = matches.value_of("INPUT").unwrap();
     let out_path = matches.value_of("OUTPUT").unwrap();
 
+    let before = time::precise_time_ns();
+
     let mut input = File::open(in_path).unwrap();
     let mut image = Image::new().unwrap();
     while let AddDataResult::Continue = image.add_data(&mut input).unwrap() {}
@@ -116,7 +126,6 @@ fn main() {
     let dimensions = image.metadata().as_ref().unwrap().dimensions;
     let color_depth = image.metadata().as_ref().unwrap().color_depth;
 
-    let before = time::precise_time_ns();
     let pixels = decode(&mut image, &mut input, dimensions.width, dimensions.height);
     println!("Elapsed time: {}ms", (time::precise_time_ns() - before) as f32 / 1_000_000.0);
 
@@ -128,7 +137,7 @@ fn main() {
     output.write_u16::<LittleEndian>(dimensions.height as u16).unwrap();
     output.write_all(&[24, 0]).unwrap();
 
-    let aligned_stride = aligned_stride(dimensions.width);
+    let aligned_stride = parng::align(dimensions.width as usize * 4);
     for y in 0..dimensions.height {
         let y = dimensions.height - y - 1;
         for x in 0..dimensions.width {

@@ -5,7 +5,6 @@ extern crate libc;
 extern crate libz_sys;
 extern crate num;
 
-use interlacing::{LevelOfDetail, LodDimensionQuery};
 use libc::c_int;
 use libz_sys::{Z_ERRNO, Z_NO_FLUSH, Z_OK, Z_STREAM_END, z_stream};
 use metadata::{ChunkHeader, InterlaceMethod, Metadata};
@@ -18,7 +17,6 @@ use std::thread;
 
 const BUFFER_SIZE: usize = 16384;
 
-pub mod interlacing;
 pub mod metadata;
 
 pub struct Image {
@@ -324,6 +322,44 @@ impl Image {
             offset
         }
     }
+    
+    // FIXME(pcwalton): Unify with `InterlacingInfo` below!
+    fn width_for_lod(&self, lod: LevelOfDetail) -> u32 {
+        let metadata = self.metadata.as_ref().unwrap();
+        let image_width = metadata.dimensions.width;
+        match lod {
+            LevelOfDetail::Adam7(0) | LevelOfDetail::Adam7(1) => image_width / 8,
+            LevelOfDetail::Adam7(2) | LevelOfDetail::Adam7(3) => image_width / 4,
+            LevelOfDetail::Adam7(4) | LevelOfDetail::Adam7(5) => image_width / 2,
+            _ => image_width,
+        }
+    }
+
+    // FIXME(pcwalton): Unify with `InterlacingInfo` below!
+    fn height_for_lod(&self, lod: LevelOfDetail) -> u32 {
+        let metadata = self.metadata.as_ref().unwrap();
+        let image_height = metadata.dimensions.height;
+        match lod {
+            LevelOfDetail::Adam7(0) |
+            LevelOfDetail::Adam7(1) |
+            LevelOfDetail::Adam7(2) => image_height / 8,
+            LevelOfDetail::Adam7(3) | LevelOfDetail::Adam7(4) => image_height / 4,
+            LevelOfDetail::Adam7(5) => image_height / 2,
+            _ => image_height,
+        }
+    }
+
+    // FIXME(pcwalton): Unify with `InterlacingInfo` below!
+    fn stride_for_lod_and_color_depth(&self, lod: LevelOfDetail, color_depth: u8) -> u32 {
+        self.width_for_lod(lod) * ((color_depth / 8) as u32)
+    }
+
+    // FIXME(pcwalton): Unify with `InterlacingInfo` below!
+    fn stride_for_lod(&self, lod: LevelOfDetail) -> u32 {
+        let metadata = self.metadata.as_ref().unwrap();
+        let color_depth = metadata.color_depth;
+        self.width_for_lod(lod) * ((color_depth / 8) as u32)
+    }
 }
 
 #[derive(Debug)]
@@ -396,50 +432,65 @@ impl Predictor {
         }
     }
 
-    fn predict(self, dest: &mut [u8], src: &[u8], prev: &[u8], width: u32, color_depth: u8) {
+    fn predict(self,
+               dest: &mut [u8],
+               src: &[u8],
+               prev: &[u8],
+               width: u32,
+               color_depth: u8,
+               stride: u8) {
         let color_depth = (color_depth / 8) as usize;
         let mut a: [u8; 4] = [0; 4];
         let mut c: [u8; 4] = [0; 4];
+        let stride = stride as usize;
         match self {
             Predictor::None => {
-                for (dest, src) in dest.chunks_mut(4).zip(src.chunks(color_depth)) {
-                    for (dest, src) in dest.iter_mut().zip(src.iter()) {
+                for (dest, src) in dest.chunks_mut(stride).zip(src.chunks(color_depth)) {
+                    for (dest, src) in dest.iter_mut().take(4).zip(src.iter()) {
                         *dest = *src
                     }
                 }
             }
             Predictor::Left => {
-                for (dest, src) in dest.chunks_mut(4).zip(src.chunks(color_depth)) {
-                    for (dest, (src, a)) in dest.iter_mut().zip(src.iter().zip(a.iter_mut())) {
+                for (dest, src) in dest.chunks_mut(stride).zip(src.chunks(color_depth)) {
+                    for (dest, (src, a)) in dest.iter_mut()
+                                                .take(4)
+                                                .zip(src.iter().zip(a.iter_mut())) {
                         *a = src.wrapping_add(*a);
                         *dest = *a
                     }
                 }
             }
             Predictor::Up => {
-                for (dest, (src, b)) in dest.chunks_mut(4).zip(src.chunks(color_depth)
-                                                                  .zip(prev.chunks(4))) {
-                    for (dest, (src, b)) in dest.iter_mut().zip(src.iter().zip(b.iter())) {
+                for (dest, (src, b)) in dest.chunks_mut(stride).zip(src.chunks(color_depth)
+                                                                       .zip(prev.chunks(stride))) {
+                    for (dest, (src, b)) in dest.iter_mut()
+                                                .take(4)
+                                                .zip(src.iter().zip(b.iter().take(4))) {
                         *dest = src.wrapping_add(*b)
                     }
                 }
             }
             Predictor::Average => {
-                for (dest, (src, b)) in dest.chunks_mut(4).zip(src.chunks(color_depth)
-                                                                  .zip(prev.chunks(4))) {
+                for (dest, (src, b)) in dest.chunks_mut(stride).zip(src.chunks(color_depth)
+                                                                       .zip(prev.chunks(stride))) {
                     for (dest, (src, (b, a))) in
-                            dest.iter_mut().zip(src.iter().zip(b.iter().zip(a.iter_mut()))) {
+                            dest.iter_mut()
+                                .take(4)
+                                .zip(src.iter().zip(b.iter().take(4).zip(a.iter_mut()))) {
                         *a = src.wrapping_add((((*a as u16) + (*b as u16)) / 2) as u8);
                         *dest = *a
                     }
                 }
             }
             Predictor::Paeth => {
-                for (dest, (src, b)) in dest.chunks_mut(4).zip(src.chunks(color_depth)
-                                                                  .zip(prev.chunks(4))) {
+                for (dest, (src, b)) in dest.chunks_mut(stride).zip(src.chunks(color_depth)
+                                                                       .zip(prev.chunks(stride))) {
                     for (a, (b, (c, (dest, src)))) in
-                        a.iter_mut().zip(b.iter().zip(c.iter_mut()
-                                                       .zip(dest.iter_mut().zip(src.iter())))) {
+                        a.iter_mut().zip(b.iter().take(4).zip(c.iter_mut()
+                                                               .zip(dest.iter_mut()
+                                                                        .take(4)
+                                                                        .zip(src.iter())))) {
                         let paeth = paeth(*a, *b, *c);
                         *a = src.wrapping_add(paeth);
                         *c = *b;
@@ -470,26 +521,30 @@ impl Predictor {
                            src: &[u8],
                            prev: &[u8],
                            width: u32,
-                           color_depth: u8) {
+                           color_depth: u8,
+                           stride: u8) {
         debug_assert!(((dest.as_ptr() as usize) & 0xf) == 0);
         debug_assert!(((src.as_ptr() as usize) & 0xf) == 0);
         debug_assert!(((prev.as_ptr() as usize) & 0xf) == 0);
         debug_assert!(color_depth == 32 || color_depth == 24);
 
-        let decode_scanline = match (self, color_depth) {
-            (Predictor::None, 32) => return,
-            (Predictor::None, _) => {
-                // FIXME(pcwalton): Implement this!
-                panic!("None predictor only supported with 32 BPP!")
-            }
-            (Predictor::Left, 32) => parng_predict_scanline_left_packed_32bpp,
-            (Predictor::Left, 24) => parng_predict_scanline_left_packed_24bpp,
-            (Predictor::Up, 32) => parng_predict_scanline_up_packed_32bpp,
-            (Predictor::Up, 24) => parng_predict_scanline_up_packed_24bpp,
-            (Predictor::Average, 32) => parng_predict_scanline_average_strided_32bpp,
-            (Predictor::Average, 24) => parng_predict_scanline_average_strided_24bpp,
-            (Predictor::Paeth, 32) => parng_predict_scanline_paeth_strided_32bpp,
-            (Predictor::Paeth, 24) => parng_predict_scanline_paeth_strided_24bpp,
+        let decode_scanline = match (self, color_depth, stride) {
+            (Predictor::None, 32, 4) => parng_predict_scanline_none_packed_32bpp,
+            (Predictor::None, 32, _) => parng_predict_scanline_none_strided_32bpp,
+            (Predictor::None, 24, 4) => parng_predict_scanline_none_packed_32bpp,
+            (Predictor::None, 24, _) => parng_predict_scanline_none_strided_32bpp,
+            (Predictor::Left, 32, 4) => parng_predict_scanline_left_packed_32bpp,
+            (Predictor::Left, 32, _) => parng_predict_scanline_left_strided_32bpp,
+            (Predictor::Left, 24, 4) => parng_predict_scanline_left_packed_24bpp,
+            (Predictor::Left, 24, _) => parng_predict_scanline_left_strided_24bpp,
+            (Predictor::Up, 32, 4) => parng_predict_scanline_up_packed_32bpp,
+            (Predictor::Up, 32, _) => parng_predict_scanline_up_strided_32bpp,
+            (Predictor::Up, 24, 4) => parng_predict_scanline_up_packed_24bpp,
+            (Predictor::Up, 24, _) => parng_predict_scanline_up_strided_24bpp,
+            (Predictor::Average, 32, _) => parng_predict_scanline_average_strided_32bpp,
+            (Predictor::Average, 24, _) => parng_predict_scanline_average_strided_24bpp,
+            (Predictor::Paeth, 32, _) => parng_predict_scanline_paeth_strided_32bpp,
+            (Predictor::Paeth, 24, _) => parng_predict_scanline_paeth_strided_24bpp,
             _ => panic!("Unsupported predictor/color depth combination!"),
         };
         unsafe {
@@ -497,7 +552,7 @@ impl Predictor {
                             src.as_ptr(),
                             prev.as_ptr(),
                             (width as u64) * 4,
-                            4)
+                            stride as u64)
         }
     }
 }
@@ -557,7 +612,7 @@ fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
             MainThreadToPredictorThreadMsg::Predict(width,
                                                     color_depth,
                                                     predictor,
-                                                    mut scanline,
+                                                    scanline,
                                                     scanline_offset,
                                                     scanline_lod,
                                                     scanline_y) => {
@@ -570,49 +625,57 @@ fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
                 };
 
                 //println!("Predict(scanline_offset={})", scanline_offset);
-                let stride = (width as usize) * 4;
-
                 let prev_scanline_y = if scanline_y == 0 {
                     None
                 } else {
                     Some(scanline_y - 1)
                 };
-                let (prev, dest) = data_provider.read_and_mutate_scanlines(prev_scanline_y,
-                                                                           scanline_y);
+                let ProvidedScanlines {
+                    scanline_to_read: prev,
+                    scanline_to_mutate: dest,
+                    stride,
+                } = data_provider.read_and_mutate_scanlines(prev_scanline_y,
+                                                            scanline_y,
+                                                            scanline_lod);
+                let mut properly_aligned = true;
                 let prev = match prev {
                     Some(ref prev) => {
                         if !slice_is_properly_aligned(prev) {
-                            sender.send(PredictorThreadToMainThreadMsg::AlignmentError).unwrap();
-                            continue
+                            properly_aligned = false;
                         }
                         &prev[..]
                     }
                     None => {
-                        blank.extend(iter::repeat(0).take(stride));
+                        blank.extend(iter::repeat(0).take(stride as usize));
                         &blank[..]
                     }
                 };
                 if !slice_is_properly_aligned(dest) {
-                    sender.send(PredictorThreadToMainThreadMsg::AlignmentError).unwrap();
-                    continue
+                    properly_aligned = false;
                 }
+                properly_aligned = false;   // FIXME(pcwalton): !!!
 
-                match predictor {
-                    Predictor::None | Predictor::Left | Predictor::Up | Predictor::Paeth |
-                    Predictor::Average => {
+                match (predictor, properly_aligned) {
+                    (Predictor::None, true) |
+                    (Predictor::Left, true) |
+                    (Predictor::Up, true) |
+                    (Predictor::Average, true) |
+                    (Predictor::Paeth, true) => {
                         predictor.accelerated_predict(&mut dest[..],
                                                       &scanline[scanline_offset..],
                                                       &prev[..],
                                                       width,
-                                                      color_depth)
+                                                      color_depth,
+                                                      stride)
                     }
-                    /*Predictor::Left => {
-                        predictor.predict(&mut dest[dest_offset..],
-                                                      &scanline[scanline_offset..],
-                                                      &prev[prev_offset..],
-                                                      width,
-                                                      color_depth)
-                    }*/
+                    _ => {
+                        predictor.predict(&mut dest[..],
+                                          &scanline[scanline_offset..],
+                                          &prev[..],
+                                          width,
+                                          color_depth,
+                                          stride)
+                    }
                 }
 
                 sender.send(PredictorThreadToMainThreadMsg::ScanlineComplete(scanline_y,
@@ -641,9 +704,16 @@ pub trait DataProvider : Send {
     /// `scanline_to_read`, if present, will always be above `scanline_to_mutate`.
     fn read_and_mutate_scanlines<'a>(&'a mut self,
                                      scanline_to_read: Option<u32>,
-                                     scanline_to_mutate: u32)
-                                     -> (Option<&'a [u8]>, &'a mut [u8]);
+                                     scanline_to_mutate: u32,
+                                     lod: LevelOfDetail)
+                                     -> ProvidedScanlines;
     fn extract_data(&mut self);
+}
+
+pub struct ProvidedScanlines<'a> {
+    pub scanline_to_read: Option<&'a [u8]>,
+    pub scanline_to_mutate: &'a mut [u8],
+    pub stride: u8,
 }
 
 pub trait UninitializedExtension {
@@ -660,6 +730,15 @@ impl UninitializedExtension for Vec<u8> {
     }
 }
 
+pub fn align(address: usize) -> usize {
+    let remainder = address % 16;
+    if remainder == 0 {
+        address
+    } else {
+        address + 16 - remainder
+    }
+}
+
 fn slice_is_properly_aligned(buffer: &[u8]) -> bool {
     address_is_properly_aligned(buffer.as_ptr() as usize) &&
         address_is_properly_aligned(buffer.len())
@@ -669,14 +748,57 @@ fn address_is_properly_aligned(address: usize) -> bool {
     (address & 0xf) == 0
 }
 
+pub struct InterlacingInfo {
+    pub y: u32,
+    pub stride: u8,
+    pub offset: u8,
+}
+
+impl InterlacingInfo {
+    pub fn new(y: u32, lod: LevelOfDetail) -> InterlacingInfo {
+        let (y, stride, offset) = match lod {
+            LevelOfDetail::None => (y, 4, 0),
+            LevelOfDetail::Adam7(0) => (y * 8 + 0, 8 * 4, 0 * 4),
+            LevelOfDetail::Adam7(1) => (y * 8 + 0, 8 * 4, 4 * 4),
+            LevelOfDetail::Adam7(2) => (y * 8 + 4, 4 * 4, 0 * 4),
+            LevelOfDetail::Adam7(3) => (y * 4 + 0, 4 * 4, 2 * 4),
+            LevelOfDetail::Adam7(4) => (y * 4 + 2, 2 * 4, 0 * 4),
+            LevelOfDetail::Adam7(5) => (y * 2 + 0, 2 * 4, 1 * 4),
+            LevelOfDetail::Adam7(6) => (y * 2 + 1, 1 * 4, 0 * 4),
+            LevelOfDetail::Adam7(_) => panic!("Unsupported Adam7 level of detail!"),
+        };
+        InterlacingInfo {
+            y: y,
+            stride: stride,
+            offset: offset,
+        }
+    }
+}
+
 #[derive(Copy, Clone)]
 struct BufferedScanlineInfo {
     y: u32,
     lod: LevelOfDetail,
 }
 
+#[derive(Copy, Clone, PartialEq, PartialOrd, Debug)]
+pub enum LevelOfDetail {
+    None,
+    Adam7(u8),
+}
+
 #[link(name="parngacceleration")]
 extern {
+    fn parng_predict_scanline_none_packed_32bpp(dest: *mut u8,
+                                                src: *const u8,
+                                                prev: *const u8,
+                                                length: u64,
+                                                stride: u64);
+    fn parng_predict_scanline_none_strided_32bpp(dest: *mut u8,
+                                                 src: *const u8,
+                                                 prev: *const u8,
+                                                 length: u64,
+                                                 stride: u64);
     fn parng_predict_scanline_left_packed_32bpp(dest: *mut u8,
                                                 src: *const u8,
                                                 prev: *const u8,

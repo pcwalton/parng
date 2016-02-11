@@ -46,7 +46,7 @@ impl LodDimensionQuery for Image {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Debug)]
+#[derive(Copy, Clone, PartialEq, PartialOrd, Debug)]
 pub enum LevelOfDetail {
     None,
     Adam7(u8),

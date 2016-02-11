@@ -8,12 +8,98 @@ extern crate time;
 use byteorder::{LittleEndian, WriteBytesExt};
 use clap::{App, Arg};
 use parng::interlacing::{self, Adam7Scanlines, LevelOfDetail};
-use parng::{AddDataResult, DecodeResult, Image};
+use parng::{AddDataResult, DataProvider, DecodeResult, Image, UninitializedExtension};
 use std::fs::File;
 use std::io::{BufWriter, Write};
+use std::iter;
+use std::mem;
 use std::ptr;
+use std::sync::mpsc::{self, Receiver, Sender};
 
 const OUTPUT_BPP: u32 = 4;
+
+struct SlurpingDataProvider {
+    data: Vec<u8>,
+    aligned_stride: usize,
+    data_sender: Sender<Vec<u8>>,
+}
+
+fn aligned_stride(width: u32) -> usize {
+    // FIXME(pcwalton): This doesn't actually align!
+    (width * 4) as usize
+}
+
+impl SlurpingDataProvider {
+    #[inline(never)]
+    pub fn new(width: u32, height: u32) -> (SlurpingDataProvider, Receiver<Vec<u8>>) {
+        let aligned_stride = aligned_stride(width);
+        let (data_sender, data_receiver) = mpsc::channel();
+        let length = aligned_stride * (height as usize);
+        let mut data = vec![];
+        unsafe {
+            data.extend_with_uninitialized(length)
+        }
+        let data_provider = SlurpingDataProvider {
+            data: data,
+            aligned_stride: aligned_stride,
+            data_sender: data_sender,
+        };
+        (data_provider, data_receiver)
+    }
+}
+
+impl DataProvider for SlurpingDataProvider {
+    fn read_and_mutate_scanlines<'a>(&'a mut self,
+                                     scanline_to_read: Option<u32>,
+                                     scanline_to_mutate: u32)
+                                     -> (Option<&'a [u8]>, &'a mut [u8]) {
+        let aligned_stride = self.aligned_stride;
+        let split_point = aligned_stride * (scanline_to_mutate as usize);
+        let (head, tail) = self.data.split_at_mut(split_point);
+        let scanline_data_for_reading = match scanline_to_read {
+            None => None,
+            Some(scanline_to_read) => {
+                let start = (scanline_to_read as usize) * aligned_stride;
+                let end = start + aligned_stride;
+                let slice = &head[start..end];
+                Some(slice)
+            }
+        };
+        let start = (scanline_to_mutate as usize) * aligned_stride - head.len();
+        let end = start + aligned_stride;
+        let scanline_data_for_writing = &mut tail[start..end];
+        (scanline_data_for_reading, scanline_data_for_writing)
+    }
+
+    fn extract_data(&mut self) {
+        self.data_sender.send(mem::replace(&mut self.data, vec![])).unwrap()
+    }
+}
+
+#[inline(never)]
+fn get_data_from_receiver(data_receiver: Receiver<Vec<u8>>) -> Vec<u8> {
+    data_receiver.recv().unwrap()
+}
+
+#[inline(never)]
+fn decode(image: &mut Image, input: &mut File, width: u32, height: u32) -> Vec<u8> {
+    let (data_provider, data_receiver) = SlurpingDataProvider::new(width, height);
+    image.set_data_provider(Box::new(data_provider));
+
+    loop {
+        match image.add_data(input).unwrap() {
+            AddDataResult::Continue => {}
+            AddDataResult::BufferFull => image.decode().unwrap(),
+            AddDataResult::Finished => {
+                image.decode().unwrap();
+                break
+            }
+        }
+    }
+    image.wait_until_finished().unwrap();
+    image.extract_data();
+    get_data_from_receiver(data_receiver)
+}
 
 fn main() {
     let matches = App::new("example").arg(Arg::with_name("INPUT").required(true))
@@ -31,101 +117,7 @@ fn main() {
     let color_depth = image.metadata().as_ref().unwrap().color_depth;
 
     let before = time::precise_time_ns();
-
-    let mut pixels = vec![];
-    let mut interlaced_pixels = [vec![], vec![], vec![], vec![], vec![], vec![], vec![]];
-    let stride = dimensions.width as usize * 4;
-    pixels.reserve((dimensions.height as usize) * stride);
-
-    let mut y = 0;
-    while y < dimensions.height {
-        while let AddDataResult::Continue = image.add_data(&mut input).unwrap() {}
-        match image.decode().unwrap() {
-            DecodeResult::Scanline(scanline, LevelOfDetail::Adam7(lod)) => {
-                //println!("got scanline with LOD {:?}", lod);
-                interlaced_pixels[lod as usize].extend_from_slice(&scanline[..]);
-                if lod == 6 && interlaced_pixels[6].len() >= stride * 4 {
-                    y += 8;
-
-                    // FIXME(pcwalton): Do this in a separate thread for parallelism.
-                    //
-                    // TODO(pcwalton): Figure out a nice way to expose this in the API. The
-                    // low-level control philosophy of parng has jumped the shark at this
-                    // point.
-                    let original_length = pixels.len();
-                    pixels.resize(original_length + stride * 8, 0);
-                    let lengths = [
-                        stride / 8,
-                        stride / 8,
-                        stride / 4,
-                        stride / 2,
-                        stride,
-                        stride * 2,
-                        stride * 4
-                    ];
-                    if interlaced_pixels.iter().zip(lengths.iter()).all(|(pixels, &length)| {
-                                pixels.len() >= length
-                            }) {
-                        {
-                            let scanlines = Adam7Scanlines {
-                                lod0: [&interlaced_pixels[0][..]],
-                                lod1: Some([&interlaced_pixels[1][..]]),
-                                lod2: Some([&interlaced_pixels[2][..]]),
-                                lod3: Some([
-                                    &interlaced_pixels[3][0..(stride / 4)],
-                                    &interlaced_pixels[3][(stride / 4)..(stride / 2)],
-                                ]),
-                                lod4: Some([
-                                    &interlaced_pixels[4][0..(stride / 2)],
-                                    &interlaced_pixels[4][(stride / 2)..stride],
-                                ]),
-                                lod5: Some([
-                                    &interlaced_pixels[5][0..(stride / 2)],
-                                    &interlaced_pixels[5][(stride / 2)..stride],
-                                    &interlaced_pixels[5][stride..(stride * 3 / 2)],
-                                    &interlaced_pixels[5][(stride * 3 / 2)..],
-                                ]),
-                                lod6: Some([
-                                    &interlaced_pixels[6][0..stride],
-                                    &interlaced_pixels[6][stride..stride * 2],
-                                    &interlaced_pixels[6][stride * 2..stride * 3],
-                                    &interlaced_pixels[6][stride * 3..],
-                                ]),
-                            };
-
-                            interlacing::deinterlace_adam7(&mut pixels[original_length..],
-                                                           &scanlines,
-                                                           dimensions.width,
-                                                           color_depth);
-                        }
-
-                        // FIXME(pcwalton): Terrible.
-                        for (buffer, &length) in interlaced_pixels.iter_mut().zip(lengths.iter()) {
-                            let original_length = buffer.len();
-                            unsafe {
-                                ptr::copy(buffer.as_mut_ptr().offset(length as isize),
-                                          buffer.as_mut_ptr(),
-                                          original_length - length);
-                            }
-                            buffer.truncate(original_length - length);
-                        }
-                    } else {
-                        println!("bad lengths: {:?} stride={}",
-                                 interlaced_pixels.iter()
-                                                  .map(|pixels| pixels.len())
-                                                  .collect::<Vec<_>>(),
-                                 stride);
-                    }
-                }
-            }
-            DecodeResult::Scanline(scanline, LevelOfDetail::None) => {
-                y += 1;
-                pixels.extend_from_slice(&scanline[..]);
-            }
-            DecodeResult::None => {}
-        }
-    }
-    pixels.resize((dimensions.height as usize) * stride, 0);   // FIXME(pcwalton)
+    let pixels = decode(&mut image, &mut input, dimensions.width, dimensions.height);
     println!("Elapsed time: {}ms", (time::precise_time_ns() - before) as f32 / 1_000_000.0);
 
     let mut output = BufWriter::new(File::create(out_path).unwrap());
@@ -136,10 +128,11 @@ fn main() {
     output.write_u16::<LittleEndian>(dimensions.height as u16).unwrap();
     output.write_all(&[24, 0]).unwrap();
 
+    let aligned_stride = aligned_stride(dimensions.width);
     for y in 0..dimensions.height {
         let y = dimensions.height - y - 1;
         for x in 0..dimensions.width {
-            let start = (((y * dimensions.width) + x) * OUTPUT_BPP) as usize;
+            let start = (aligned_stride * (y as usize)) + (x as usize) * (OUTPUT_BPP as usize);
             output.write_all(&[pixels[start + 2], pixels[start + 1], pixels[start]]).unwrap();
         }
     }

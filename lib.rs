@@ -11,6 +11,7 @@ use libz_sys::{Z_ERRNO, Z_NO_FLUSH, Z_OK, Z_STREAM_END, z_stream};
 use metadata::{ChunkHeader, InterlaceMethod, Metadata};
 use std::cmp;
 use std::io::{self, Read, Seek, SeekFrom};
+use std::iter;
 use std::mem;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -27,17 +28,17 @@ pub struct Image {
     compressed_data_consumed: usize,
     scanline_data_buffer: Vec<u8>,
     scanline_data_buffer_size: usize,
+    cached_scanline_data_buffers: Vec<Vec<u8>>,
 
     /// If `None`, the buffered scanline isn't full yet.
-    ///
-    /// FIXME(pcwalton): This is kind of an ugly way to keep track of the scanline data buffer's
-    /// fullness; can we do something nicer?
-    scanline_data_buffer_lod: Option<LevelOfDetail>,
+    scanline_data_buffer_info: Option<BufferedScanlineInfo>,
 
     current_y: u32,
     current_lod: LevelOfDetail,
+    scanlines_decoded_in_this_lod: u32,
+    last_decoded_lod: LevelOfDetail,
     decode_state: DecodeState,
-    predictor_thread_comm: Option<MainThreadToPredictorThreadComm>,
+    predictor_thread_comm: MainThreadToPredictorThreadComm,
 }
 
 impl Drop for Image {
@@ -62,11 +63,14 @@ impl Image {
             compressed_data_consumed: 0,
             scanline_data_buffer: vec![],
             scanline_data_buffer_size: 0,
-            scanline_data_buffer_lod: None,
+            scanline_data_buffer_info: None,
+            cached_scanline_data_buffers: vec![],
             current_y: 0,
             current_lod: LevelOfDetail::None,
+            scanlines_decoded_in_this_lod: 0,
+            last_decoded_lod: LevelOfDetail::None,
             decode_state: DecodeState::Start,
-            predictor_thread_comm: None,
+            predictor_thread_comm: MainThreadToPredictorThreadComm::new(),
         })
     }
 
@@ -118,7 +122,7 @@ impl Image {
                 }
                 DecodeState::DecodingData(bytes_left_in_chunk) => {
                     let stride = self.stride_for_lod(self.current_lod);
-                    if self.scanline_data_buffer_lod.is_some() {
+                    if self.scanline_data_buffer_info.is_some() {
                         return Ok(AddDataResult::BufferFull)
                     }
 
@@ -152,7 +156,8 @@ impl Image {
                         if self.z_stream.avail_in != 0 {
                             // Make room for the stride + 32 bytes, which should be enough to
                             // handle any amount of padding on both ends.
-                            self.scanline_data_buffer.resize(1 + (stride as usize) + 32, 0);
+                            self.scanline_data_buffer
+                                .extend_with_uninitialized(1 + (stride as usize) + 32);
                             let offset = self.aligned_scanline_buffer_offset();
                             let original_size = self.scanline_data_buffer_size;
                             self.z_stream.avail_out = 1 + stride - (original_size as u32);
@@ -173,14 +178,17 @@ impl Image {
 
                     // Advance the Y position if necessary.
                     if self.scanline_data_buffer_size == 1 + stride as usize {
+                        self.scanline_data_buffer_info = Some(BufferedScanlineInfo {
+                            lod: self.current_lod,
+                            y: self.current_y,
+                        });
                         self.current_y += 1;
-                        self.scanline_data_buffer_lod = Some(self.current_lod);
                         //println!("incrementing current Y: now at {}", self.current_y);
                         if self.current_y == self.height_for_lod(self.current_lod) {
                             self.current_y = 0;
                             if let LevelOfDetail::Adam7(ref mut current_lod) = self.current_lod {
                                 *current_lod += 1;
-                                println!("incrementing LOD: now at {}", *current_lod);
+                                //println!("incrementing LOD: now at {}", *current_lod);
                             }
                         }
                     }
@@ -210,57 +218,97 @@ impl Image {
     }
 
     #[inline(never)]
-    pub fn decode(&mut self) -> Result<DecodeResult,PngError> {
-        let width_and_lod_for_scanline_data_buffer_if_full =
-            self.scanline_data_buffer_lod.map(|lod| (self.width_for_lod(lod), lod));
+    pub fn decode(&mut self) -> Result<(),PngError> {
+        let width_and_info_for_scanline_data_buffer_if_full = self.scanline_data_buffer_info
+                                                                  .as_ref()
+                                                                  .map(|info| {
+            (self.width_for_lod(info.lod), *info)
+        });
         let scanline_buffer_offset = self.aligned_scanline_buffer_offset();
 
-        let result;
-        {
-            if self.predictor_thread_comm.is_none() {
-                self.predictor_thread_comm = Some(MainThreadToPredictorThreadComm::new())
-            }
-            let predictor_thread_comm = self.predictor_thread_comm.as_mut().unwrap();
+        if let Some((scanline_width, scanline_info)) =
+                width_and_info_for_scanline_data_buffer_if_full {
+            let predictor = self.scanline_data_buffer[scanline_buffer_offset - 1];
+            //println!("predictor={}", predictor);
 
-            result = if predictor_thread_comm.scanlines_in_progress > 0 {
-                predictor_thread_comm.receiver.try_recv().ok().map(|msg| {
-                    predictor_thread_comm.scanlines_in_progress -= 1;
-                    (msg.0, msg.1)
-                })
-            } else {
-                None
+            let empty_scanline_data_buffer = match self.cached_scanline_data_buffers.pop() {
+                None => vec![],
+                Some(cached_scanline_data_buffer) => cached_scanline_data_buffer,
             };
-
-            if let Some((scanline_width, scanline_lod)) =
-                    width_and_lod_for_scanline_data_buffer_if_full {
-                let predictor = self.scanline_data_buffer[scanline_buffer_offset - 1];
-                //println!("predictor={}", predictor);
-
-                let msg = MainThreadToPredictorThreadMsg::Predict(
-                    scanline_width,
-                    self.metadata.as_ref().unwrap().color_depth,
-                    try!(Predictor::from_byte(predictor)),
-                    mem::replace(&mut self.scanline_data_buffer, vec![]),
-                    scanline_buffer_offset,
-                    scanline_lod);
-                self.scanline_data_buffer_size = 0;
-                predictor_thread_comm.sender.send(msg).unwrap();
-                predictor_thread_comm.scanlines_in_progress += 1
-            }
-            self.scanline_data_buffer_lod = None;
+            let msg = MainThreadToPredictorThreadMsg::Predict(
+                scanline_width,
+                self.metadata.as_ref().unwrap().color_depth,
+                try!(Predictor::from_byte(predictor)),
+                mem::replace(&mut self.scanline_data_buffer, empty_scanline_data_buffer),
+                scanline_buffer_offset,
+                scanline_info.lod,
+                scanline_info.y);
+            self.scanline_data_buffer_size = 0;
+            self.predictor_thread_comm.sender.send(msg).unwrap();
+            self.predictor_thread_comm.scanlines_in_progress += 1;
+            self.scanline_data_buffer_info = None;
         }
 
-        match result {
-            Some((result_buffer, result_lod)) => {
-                self.scanline_data_buffer = result_buffer;
-                let stride = self.stride_for_lod_and_color_depth(result_lod, 32);
-                let offset = self.aligned_scanline_buffer_offset();
-                Ok(DecodeResult::Scanline(
-                        &mut self.scanline_data_buffer[offset..(offset + stride as usize)],
-                        self.current_lod))
-            }
-            None => Ok(DecodeResult::None),
+        while let Ok(msg) = self.predictor_thread_comm.receiver.try_recv() {
+            try!(self.handle_predictor_thread_msg(msg));
         }
+
+        Ok(())
+    }
+
+    fn handle_predictor_thread_msg(&mut self, msg: PredictorThreadToMainThreadMsg)
+                                   -> Result<(),PngError> {
+        match msg {
+            PredictorThreadToMainThreadMsg::NoDataProviderError => Err(PngError::NoDataProvider),
+            PredictorThreadToMainThreadMsg::AlignmentError => Err(PngError::AlignmentError),
+            PredictorThreadToMainThreadMsg::ScanlineComplete(y, lod, mut buffer) => {
+                buffer.clear();
+                self.cached_scanline_data_buffers.push(buffer);
+                if lod > self.last_decoded_lod {
+                    self.last_decoded_lod = lod;
+                    self.scanlines_decoded_in_this_lod = 0;
+                }
+                if y >= self.scanlines_decoded_in_this_lod {
+                    debug_assert!(self.last_decoded_lod == lod);
+                    //println!("bumped SDITL={}", y + 1);
+                    self.scanlines_decoded_in_this_lod = y + 1
+                }
+                Ok(())
+            }
+        }
+    }
+
+    #[inline(never)]
+    pub fn wait_until_finished(&mut self) -> Result<(),PngError> {
+        //println!("wait_until_finish()");
+        let height = self.metadata.as_ref().expect("No metadata yet!").dimensions.height;
+
+        while (self.current_lod == LevelOfDetail::None ||
+                   self.current_lod < LevelOfDetail::Adam7(6)) &&
+                self.scanlines_decoded_in_this_lod < height {
+            let msg = self.predictor_thread_comm
+                          .receiver
+                          .recv()
+                          .expect("Predictor thread hung up!");
+            try!(self.handle_predictor_thread_msg(msg));
+        }
+        Ok(())
+    }
+
+    #[inline(never)]
+    pub fn set_data_provider(&mut self, data_provider: Box<DataProvider>) {
+        self.predictor_thread_comm
+            .sender
+            .send(MainThreadToPredictorThreadMsg::SetDataProvider(data_provider))
+            .unwrap()
+    }
+
+    #[inline(never)]
+    pub fn extract_data(&mut self) {
+        self.predictor_thread_comm
+            .sender
+            .send(MainThreadToPredictorThreadMsg::ExtractData)
+            .unwrap()
     }
 
     #[inline]
@@ -287,6 +335,8 @@ pub enum PngError {
     InvalidData(String),
     EntropyDecodingError(c_int),
     InvalidScanlinePredictor(u8),
+    NoDataProvider,
+    AlignmentError,
 }
 
 impl PngError {
@@ -432,10 +482,10 @@ impl Predictor {
                 // FIXME(pcwalton): Implement this!
                 panic!("None predictor only supported with 32 BPP!")
             }
-            (Predictor::Left, 32) => parng_predict_scanline_left_strided_32bpp,
-            (Predictor::Left, 24) => parng_predict_scanline_left_strided_24bpp,
-            (Predictor::Up, 32) => parng_predict_scanline_up_strided_32bpp,
-            (Predictor::Up, 24) => parng_predict_scanline_up_strided_24bpp,
+            (Predictor::Left, 32) => parng_predict_scanline_left_packed_32bpp,
+            (Predictor::Left, 24) => parng_predict_scanline_left_packed_24bpp,
+            (Predictor::Up, 32) => parng_predict_scanline_up_packed_32bpp,
+            (Predictor::Up, 24) => parng_predict_scanline_up_packed_24bpp,
             (Predictor::Average, 32) => parng_predict_scanline_average_strided_32bpp,
             (Predictor::Average, 24) => parng_predict_scanline_average_strided_24bpp,
             (Predictor::Paeth, 32) => parng_predict_scanline_paeth_strided_32bpp,
@@ -453,11 +503,20 @@ impl Predictor {
 }
 
 enum MainThreadToPredictorThreadMsg {
-    // Width, color depth, predictor, scanline data, scanline offset, and level of detail.
-    Predict(u32, u8, Predictor, Vec<u8>, usize, LevelOfDetail),
+    /// Sets a new `DataProvider`.
+    SetDataProvider(Box<DataProvider>),
+    /// Tells the data provider to extract data.
+    ExtractData,
+    /// Width, color depth, predictor, scanline data, scanline offset, level of detail, and Y
+    /// coordinate.
+    Predict(u32, u8, Predictor, Vec<u8>, usize, LevelOfDetail, u32),
 }
 
-struct PredictorThreadToMainThreadMsg(Vec<u8>, LevelOfDetail);
+enum PredictorThreadToMainThreadMsg {
+    ScanlineComplete(u32, LevelOfDetail, Vec<u8>),
+    NoDataProviderError,
+    AlignmentError,
+}
 
 struct MainThreadToPredictorThreadComm {
     sender: Sender<MainThreadToPredictorThreadMsg>,
@@ -484,15 +543,15 @@ impl MainThreadToPredictorThreadComm {
 }
 
 #[derive(Debug)]
-pub enum DecodeResult<'a> {
+pub enum DecodeResult {
     None,
-    Scanline(&'a mut [u8], LevelOfDetail),
+    Scanline,
 }
 
 fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
                     receiver: Receiver<MainThreadToPredictorThreadMsg>) {
-    let mut prev = vec![];
-    let mut dest = vec![];
+    let mut data_provider: Option<Box<DataProvider>> = None;
+    let mut blank = vec![];
     while let Ok(msg) = receiver.recv() {
         match msg {
             MainThreadToPredictorThreadMsg::Predict(width,
@@ -500,28 +559,50 @@ fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
                                                     predictor,
                                                     mut scanline,
                                                     scanline_offset,
-                                                    scanline_lod) => {
+                                                    scanline_lod,
+                                                    scanline_y) => {
+                let data_provider = match data_provider {
+                    None => {
+                        sender.send(PredictorThreadToMainThreadMsg::NoDataProviderError).unwrap();
+                        continue
+                    }
+                    Some(ref mut data_provider) => data_provider,
+                };
+
                 //println!("Predict(scanline_offset={})", scanline_offset);
                 let stride = (width as usize) * 4;
 
-                // Pad out to 32 bytes. This should be enough to handle any amount of padding at
-                // both the beginning and end.
-                while prev.len() < stride + 32 {
-                    prev.push(0)
+                let prev_scanline_y = if scanline_y == 0 {
+                    None
+                } else {
+                    Some(scanline_y - 1)
+                };
+                let (prev, dest) = data_provider.read_and_mutate_scanlines(prev_scanline_y,
+                                                                           scanline_y);
+                let prev = match prev {
+                    Some(ref prev) => {
+                        if !slice_is_properly_aligned(prev) {
+                            sender.send(PredictorThreadToMainThreadMsg::AlignmentError).unwrap();
+                            continue
+                        }
+                        &prev[..]
+                    }
+                    None => {
+                        blank.extend(iter::repeat(0).take(stride));
+                        &blank[..]
+                    }
+                };
+                if !slice_is_properly_aligned(dest) {
+                    sender.send(PredictorThreadToMainThreadMsg::AlignmentError).unwrap();
+                    continue
                 }
-                let prev_offset = aligned_offset_for_slice(&prev[..]);
-
-                while dest.len() < stride + 32 {
-                    dest.push(0)
-                }
-                let dest_offset = aligned_offset_for_slice(&dest[..]);
 
                 match predictor {
                     Predictor::None | Predictor::Left | Predictor::Up | Predictor::Paeth |
                     Predictor::Average => {
-                        predictor.accelerated_predict(&mut dest[dest_offset..],
+                        predictor.accelerated_predict(&mut dest[..],
                                                       &scanline[scanline_offset..],
-                                                      &prev[prev_offset..],
+                                                      &prev[..],
                                                       width,
                                                       color_depth)
                     }
@@ -533,11 +614,18 @@ fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
                                                       color_depth)
                     }*/
                 }
-                // FIXME(pcwalton): Any way to avoid this copy?
-                prev[prev_offset..(prev_offset + stride)].clone_from_slice(
-                    &mut dest[dest_offset..(dest_offset + stride)]);
-                sender.send(PredictorThreadToMainThreadMsg(dest, scanline_lod)).unwrap();
-                dest = scanline
+
+                sender.send(PredictorThreadToMainThreadMsg::ScanlineComplete(scanline_y,
+                                                                             scanline_lod,
+                                                                             scanline)).unwrap()
+            }
+            MainThreadToPredictorThreadMsg::SetDataProvider(new_data_provider) => {
+                data_provider = Some(new_data_provider)
+            }
+            MainThreadToPredictorThreadMsg::ExtractData => {
+                if let Some(ref mut data_provider) = mem::replace(&mut data_provider, None) {
+                    data_provider.extract_data()
+                }
             }
         }
     }
@@ -547,6 +635,44 @@ fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
 unsafe fn inflateInit(strm: *mut z_stream) -> c_int {
     let version = libz_sys::zlibVersion();
     libz_sys::inflateInit_(strm, version, mem::size_of::<z_stream>() as c_int)
+}
+
+pub trait DataProvider : Send {
+    /// `scanline_to_read`, if present, will always be above `scanline_to_mutate`.
+    fn read_and_mutate_scanlines<'a>(&'a mut self,
+                                     scanline_to_read: Option<u32>,
+                                     scanline_to_mutate: u32)
+                                     -> (Option<&'a [u8]>, &'a mut [u8]);
+    fn extract_data(&mut self);
+}
+
+pub trait UninitializedExtension {
+    unsafe fn extend_with_uninitialized(&mut self, new_len: usize);
+}
+
+impl UninitializedExtension for Vec<u8> {
+    unsafe fn extend_with_uninitialized(&mut self, new_len: usize) {
+        if self.len() >= new_len {
+            return
+        }
+        self.reserve(new_len);
+        self.set_len(new_len);
+    }
+}
+
+fn slice_is_properly_aligned(buffer: &[u8]) -> bool {
+    address_is_properly_aligned(buffer.as_ptr() as usize) &&
+        address_is_properly_aligned(buffer.len())
+}
+
+fn address_is_properly_aligned(address: usize) -> bool {
+    (address & 0xf) == 0
+}
+
+#[derive(Copy, Clone)]
+struct BufferedScanlineInfo {
+    y: u32,
+    lod: LevelOfDetail,
 }
 
 #[link(name="parngacceleration")]

@@ -432,18 +432,22 @@ impl Predictor {
                 // FIXME(pcwalton): Implement this!
                 panic!("None predictor only supported with 32 BPP!")
             }
-            (Predictor::Left, 32) => parng_predict_scanline_left_32bpp,
-            (Predictor::Left, 24) => parng_predict_scanline_left_24bpp,
-            (Predictor::Up, 32) => parng_predict_scanline_up_32bpp,
-            (Predictor::Up, 24) => parng_predict_scanline_up_24bpp,
-            (Predictor::Average, 32) => parng_predict_scanline_average_32bpp,
-            (Predictor::Average, 24) => parng_predict_scanline_average_24bpp,
-            (Predictor::Paeth, 32) => parng_predict_scanline_paeth_32bpp,
-            (Predictor::Paeth, 24) => parng_predict_scanline_paeth_24bpp,
+            (Predictor::Left, 32) => parng_predict_scanline_left_strided_32bpp,
+            (Predictor::Left, 24) => parng_predict_scanline_left_strided_24bpp,
+            (Predictor::Up, 32) => parng_predict_scanline_up_strided_32bpp,
+            (Predictor::Up, 24) => parng_predict_scanline_up_strided_24bpp,
+            (Predictor::Average, 32) => parng_predict_scanline_average_strided_32bpp,
+            (Predictor::Average, 24) => parng_predict_scanline_average_strided_24bpp,
+            (Predictor::Paeth, 32) => parng_predict_scanline_paeth_strided_32bpp,
+            (Predictor::Paeth, 24) => parng_predict_scanline_paeth_strided_24bpp,
             _ => panic!("Unsupported predictor/color depth combination!"),
         };
         unsafe {
-            decode_scanline(dest.as_mut_ptr(), src.as_ptr(), prev.as_ptr(), width as u64)
+            decode_scanline(dest.as_mut_ptr(),
+                            src.as_ptr(),
+                            prev.as_ptr(),
+                            (width as u64) * 4,
+                            4)
         }
     }
 }
@@ -521,6 +525,13 @@ fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
                                                       width,
                                                       color_depth)
                     }
+                    /*Predictor::Left => {
+                        predictor.predict(&mut dest[dest_offset..],
+                                                      &scanline[scanline_offset..],
+                                                      &prev[prev_offset..],
+                                                      width,
+                                                      color_depth)
+                    }*/
                 }
                 // FIXME(pcwalton): Any way to avoid this copy?
                 prev[prev_offset..(prev_offset + stride)].clone_from_slice(
@@ -540,31 +551,65 @@ unsafe fn inflateInit(strm: *mut z_stream) -> c_int {
 
 #[link(name="parngacceleration")]
 extern {
-    fn parng_predict_scanline_left_32bpp(dest: *mut u8,
-                                         src: *const u8,
-                                         prev: *const u8,
-                                         width: u64);
-    fn parng_predict_scanline_left_24bpp(dest: *mut u8,
-                                         src: *const u8,
-                                         prev: *const u8,
-                                         width: u64);
-    fn parng_predict_scanline_up_32bpp(dest: *mut u8, src: *const u8, prev: *const u8, width: u64);
-    fn parng_predict_scanline_up_24bpp(dest: *mut u8, src: *const u8, prev: *const u8, width: u64);
-    fn parng_predict_scanline_average_32bpp(dest: *mut u8,
-                                            src: *const u8,
-                                            prev: *const u8,
-                                            width: u64);
-    fn parng_predict_scanline_average_24bpp(dest: *mut u8,
-                                            src: *const u8,
-                                            prev: *const u8,
-                                            width: u64);
-    fn parng_predict_scanline_paeth_32bpp(dest: *mut u8,
-                                          src: *const u8,
-                                          prev: *const u8,
-                                          width: u64);
-    fn parng_predict_scanline_paeth_24bpp(dest: *mut u8,
-                                          src: *const u8,
-                                          prev: *const u8,
-                                          width: u64);
+    fn parng_predict_scanline_left_packed_32bpp(dest: *mut u8,
+                                                src: *const u8,
+                                                prev: *const u8,
+                                                length: u64,
+                                                stride: u64);
+    fn parng_predict_scanline_left_strided_32bpp(dest: *mut u8,
+                                                 src: *const u8,
+                                                 prev: *const u8,
+                                                 length: u64,
+                                                 stride: u64);
+    fn parng_predict_scanline_left_packed_24bpp(dest: *mut u8,
+                                                src: *const u8,
+                                                prev: *const u8,
+                                                length: u64,
+                                                stride: u64);
+    fn parng_predict_scanline_left_strided_24bpp(dest: *mut u8,
+                                                 src: *const u8,
+                                                 prev: *const u8,
+                                                 length: u64,
+                                                 stride: u64);
+    fn parng_predict_scanline_up_packed_32bpp(dest: *mut u8,
+                                              src: *const u8,
+                                              prev: *const u8,
+                                              length: u64,
+                                              stride: u64);
+    fn parng_predict_scanline_up_strided_32bpp(dest: *mut u8,
+                                               src: *const u8,
+                                               prev: *const u8,
+                                               length: u64,
+                                               stride: u64);
+    fn parng_predict_scanline_up_packed_24bpp(dest: *mut u8,
+                                              src: *const u8,
+                                              prev: *const u8,
+                                              length: u64,
+                                              stride: u64);
+    fn parng_predict_scanline_up_strided_24bpp(dest: *mut u8,
+                                               src: *const u8,
+                                               prev: *const u8,
+                                               length: u64,
+                                               stride: u64);
+    fn parng_predict_scanline_average_strided_32bpp(dest: *mut u8,
+                                                    src: *const u8,
+                                                    prev: *const u8,
+                                                    length: u64,
+                                                    stride: u64);
+    fn parng_predict_scanline_average_strided_24bpp(dest: *mut u8,
+                                                    src: *const u8,
+                                                    prev: *const u8,
+                                                    length: u64,
+                                                    stride: u64);
+    fn parng_predict_scanline_paeth_strided_32bpp(dest: *mut u8,
+                                                  src: *const u8,
+                                                  prev: *const u8,
+                                                  length: u64,
+                                                  stride: u64);
+    fn parng_predict_scanline_paeth_strided_24bpp(dest: *mut u8,
+                                                  src: *const u8,
+                                                  prev: *const u8,
+                                                  length: u64,
+                                                  stride: u64);
 }
 

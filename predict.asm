@@ -6,14 +6,17 @@ global parng_predict_scanline_none_packed_32bpp
 global parng_predict_scanline_none_strided_32bpp
 global parng_predict_scanline_none_packed_24bpp
 global parng_predict_scanline_none_strided_24bpp
+global parng_predict_scanline_none_packed_8bpp
 global parng_predict_scanline_left_packed_32bpp
 global parng_predict_scanline_left_strided_32bpp
 global parng_predict_scanline_left_packed_24bpp
 global parng_predict_scanline_left_strided_24bpp
+global parng_predict_scanline_left_packed_8bpp
 global parng_predict_scanline_up_packed_32bpp
 global parng_predict_scanline_up_strided_32bpp
 global parng_predict_scanline_up_packed_24bpp
 global parng_predict_scanline_up_strided_24bpp
+global parng_predict_scanline_up_packed_8bpp
 global parng_predict_scanline_average_strided_32bpp
 global parng_predict_scanline_average_strided_24bpp
 global parng_predict_scanline_paeth_strided_32bpp
@@ -35,6 +38,16 @@ global parng_predict_scanline_paeth_strided_24bpp
 %endif
 
 section .text
+
+; load_8bpp_to_32bpp_shuffle_mask(r128 dest)
+;
+; Register clobbers: rax
+%macro load_8bpp_to_32bpp_shuffle_mask 1
+    mov rax,0x0101010100000000
+    movq %1,rax
+    mov rax,0x0303030302020202
+    pinsrq %1,rax,1                             ; dest = 8bpp → 32bpp shuffle mask
+%endmacro
 
 ; load_24bpp_to_32bpp_shuffle_mask(r128 dest)
 ;
@@ -141,6 +154,24 @@ parng_predict_scanline_none_strided_24bpp:
     jb .loop
     ret
 
+; parng_predict_scanline_none_packed_8bpp(uint8x4 *dest,
+;                                         uint8x4 *src,
+;                                         uint8x4 *prev,
+;                                         uint64_t length,
+;                                         uint64_t stride)
+parng_predict_scanline_none_packed_8bpp:
+    load_8bpp_to_32bpp_shuffle_mask xmm1
+    xor rax,rax
+.loop:
+    movd xmm0,[src]
+    pshufb xmm0,xmm1
+    movdqa [dest+rax],xmm0
+    add src,4
+    add rax,16
+    cmp rax,length
+    jb .loop
+    ret
+
 ; predict_pixels_left(r/m128 dest, r/m128 src)
 ;
 ; Register inputs: xmm0 = [ 0, 0, 0, z ]
@@ -241,6 +272,26 @@ parng_predict_scanline_left_strided_24bpp:
     jb .loop
     ret
 
+; parng_predict_scanline_left_packed_8bpp(uint8x4 *dest,
+;                                         uint8x3 *src,
+;                                         uint8x4 *prev,
+;                                         uint64_t length,
+;                                         uint64_t stride)
+parng_predict_scanline_left_packed_8bpp:
+    load_8bpp_to_32bpp_shuffle_mask xmm2        ; xmm2 = 8bpp → 32bpp shuffle mask
+    xorps xmm0,xmm0                             ; xmm0 = a = 0
+    xor rax,rax
+.loop:
+    movd xmm1,[src]                             ; xmm1 = src (8bpp)
+    pshufb xmm1,xmm2                            ; xmm1 = [ d, c, b, a ]
+    predict_pixels_left xmm1,xmm1               ; xmm1 = result; xmm0 = [ 0, 0, 0, a+b+c+d+z ]
+    movdqa [dest+rax],xmm1
+    add src,4
+    add rax,16
+    cmp rax,length
+    jb .loop
+    ret
+
 ; parng_predict_scanline_up_packed_32bpp(uint8x4 *dest,
 ;                                        uint8x4 *src,
 ;                                        uint8x4 *prev,
@@ -316,6 +367,26 @@ parng_predict_scanline_up_strided_24bpp:
     movd [dest+rax],xmm0                        ; write result
     add src,3
     add rax,stride
+    cmp rax,length
+    jb .loop
+    ret
+
+; parng_predict_scanline_up_packed_8bpp(uint8x4 *dest,
+;                                       uint8 *src,
+;                                       uint8x4 *prev,
+;                                       uint64_t length,
+;                                       uint64_t stride)
+parng_predict_scanline_up_packed_8bpp:
+    load_8bpp_to_32bpp_shuffle_mask xmm2        ; xmm2 = 24bpp → 32bpp shuffle mask
+    xor rax,rax
+.loop:
+    movdqa xmm0,[prev+rax]                      ; xmm0 = prev
+    movdqu xmm1,[src]                           ; xmm1 = src (24bpp)
+    pshufb xmm1,xmm2                            ; xmm1 = src (32bpp)
+    paddb xmm0,xmm1                             ; xmm0 = prev + this
+    movdqa [dest+rax],xmm0                      ; write result
+    add src,12
+    add rax,16
     cmp rax,length
     jb .loop
     ret

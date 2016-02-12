@@ -7,13 +7,11 @@ extern crate time;
 
 use byteorder::{LittleEndian, WriteBytesExt};
 use clap::{App, Arg};
-use parng::{AddDataResult, DataProvider, DecodeResult, Image, InterlacingInfo, LevelOfDetail};
-use parng::{ProvidedScanlines, UninitializedExtension};
+use parng::{AddDataResult, DataProvider, Image, InterlacingInfo, LevelOfDetail, ScanlineData};
+use parng::{UninitializedExtension};
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::iter;
 use std::mem;
-use std::ptr;
 use std::sync::mpsc::{self, Receiver, Sender};
 
 const OUTPUT_BPP: u32 = 4;
@@ -44,38 +42,39 @@ impl SlurpingDataProvider {
 }
 
 impl DataProvider for SlurpingDataProvider {
-    fn read_and_mutate_scanlines<'a>(&'a mut self,
-                                     scanline_to_read: Option<u32>,
-                                     scanline_to_mutate: u32,
-                                     lod: LevelOfDetail)
-                                     -> ProvidedScanlines {
-        let scanline_to_read = scanline_to_read.map(|scanline_to_read| {
-            InterlacingInfo::new(scanline_to_read, lod)
+    fn get_scanline_data<'a>(&'a mut self,
+                             reference_scanline: Option<u32>,
+                             current_scanline: u32,
+                             lod: LevelOfDetail)
+                             -> ScanlineData {
+        let reference_scanline = reference_scanline.map(|reference_scanline| {
+            InterlacingInfo::new(reference_scanline, lod)
         });
-        let scanline_to_mutate = InterlacingInfo::new(scanline_to_mutate, lod);
+        let current_scanline = InterlacingInfo::new(current_scanline, lod);
 
         let aligned_stride = self.aligned_stride;
-        let split_point = aligned_stride * (scanline_to_mutate.y as usize);
+        let split_point = aligned_stride * (current_scanline.y as usize);
         let (head, tail) = self.data.split_at_mut(split_point);
-        let scanline_data_for_reading = match scanline_to_read {
+        let head_length = head.len();
+        let reference_scanline_data = match reference_scanline {
             None => None,
-            Some(scanline_to_read) => {
-                debug_assert!(scanline_to_mutate.stride == scanline_to_read.stride);
-                let start = (scanline_to_read.y as usize) * aligned_stride +
-                    (scanline_to_read.offset as usize);
+            Some(reference_scanline) => {
+                debug_assert!(current_scanline.stride == reference_scanline.stride);
+                let start = (reference_scanline.y as usize) * aligned_stride +
+                    (reference_scanline.offset as usize);
                 let end = start + aligned_stride;
-                let slice = &head[start..end];
+                let slice = &mut head[start..end];
                 Some(slice)
             }
         };
-        let start = (scanline_to_mutate.y as usize) * aligned_stride +
-            (scanline_to_mutate.offset as usize) - head.len();
+        let start = (current_scanline.y as usize) * aligned_stride +
+            (current_scanline.offset as usize) - head_length;
         let end = start + aligned_stride;
-        let scanline_data_for_writing = &mut tail[start..end];
-        ProvidedScanlines {
-            scanline_to_read: scanline_data_for_reading,
-            scanline_to_mutate: scanline_data_for_writing,
-            stride: scanline_to_mutate.stride,
+        let current_scanline_data = &mut tail[start..end];
+        ScanlineData {
+            reference_scanline: reference_scanline_data,
+            current_scanline: current_scanline_data,
+            stride: current_scanline.stride,
         }
     }
 
@@ -124,7 +123,6 @@ fn main() {
     while let AddDataResult::Continue = image.add_data(&mut input).unwrap() {}
 
     let dimensions = image.metadata().as_ref().unwrap().dimensions;
-    let color_depth = image.metadata().as_ref().unwrap().color_depth;
 
     let pixels = decode(&mut image, &mut input, dimensions.width, dimensions.height);
     println!("Elapsed time: {}ms", (time::precise_time_ns() - before) as f32 / 1_000_000.0);

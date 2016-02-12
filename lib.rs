@@ -7,7 +7,7 @@ extern crate num;
 
 use libc::c_int;
 use libz_sys::{Z_ERRNO, Z_NO_FLUSH, Z_OK, Z_STREAM_END, z_stream};
-use metadata::{ChunkHeader, InterlaceMethod, Metadata};
+use metadata::{ChunkHeader, ColorType, InterlaceMethod, Metadata};
 use std::cmp;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::iter;
@@ -24,6 +24,7 @@ pub struct Image {
     z_stream: z_stream,
     compressed_data_buffer: Vec<u8>,
     compressed_data_consumed: usize,
+    palette: Vec<u8>,
     scanline_data_buffer: Vec<u8>,
     scanline_data_buffer_size: usize,
     cached_scanline_data_buffers: Vec<Vec<u8>>,
@@ -59,6 +60,7 @@ impl Image {
             z_stream: z_stream,
             compressed_data_buffer: vec![],
             compressed_data_consumed: 0,
+            palette: vec![],
             scanline_data_buffer: vec![],
             scanline_data_buffer_size: 0,
             scanline_data_buffer_info: None,
@@ -87,14 +89,38 @@ impl Image {
                                 InterlaceMethod::Disabled => LevelOfDetail::None,
                             };
 
-                            self.metadata = Some(metadata);
-                            self.decode_state = DecodeState::LookingForImageData
+                            self.decode_state = if metadata.color_type == ColorType::Indexed {
+                                DecodeState::LookingForPalette
+                            } else {
+                                DecodeState::LookingForImageData
+                            };
+
+                            self.metadata = Some(metadata)
                         }
                         Err(PngError::NeedMoreData) => {
                             try!(reader.seek(SeekFrom::Start(initial_pos)).map_err(PngError::Io));
                             return Ok(AddDataResult::Continue)
                         }
                         Err(error) => return Err(error),
+                    }
+                }
+                DecodeState::LookingForPalette => {
+                    let initial_pos =
+                        try!(reader.seek(SeekFrom::Current(0)).map_err(PngError::Io));
+                    let chunk_header = match ChunkHeader::load(reader) {
+                        Err(PngError::NeedMoreData) => {
+                            try!(reader.seek(SeekFrom::Start(initial_pos)).map_err(PngError::Io));
+                            return Ok(AddDataResult::Continue)
+                        }
+                        Err(error) => return Err(error),
+                        Ok(chunk_header) => chunk_header,
+                    };
+                    if &chunk_header.chunk_type == b"PLTE" {
+                        self.decode_state = DecodeState::ReadingPalette(chunk_header.length);
+                    } else {
+                        // Skip over this chunk, adding 4 to move past the CRC.
+                        try!(reader.seek(SeekFrom::Current((chunk_header.length as i64) + 4))
+                                   .map_err(PngError::Io));
                     }
                 }
                 DecodeState::LookingForImageData => {
@@ -117,6 +143,31 @@ impl Image {
                         try!(reader.seek(SeekFrom::Current((chunk_header.length as i64) + 4))
                                    .map_err(PngError::Io));
                     }
+                }
+                DecodeState::ReadingPalette(mut bytes_left_in_chunk) => {
+                    let original_palette_size = self.palette.len();
+                    self.palette.resize(original_palette_size + bytes_left_in_chunk as usize, 0);
+                    let bytes_read =
+                        try!(reader.read(&mut self.palette[original_palette_size..])
+                                   .map_err(PngError::Io));
+                    bytes_left_in_chunk -= bytes_read as u32;
+                    self.palette.truncate(original_palette_size + bytes_read);
+                    if bytes_left_in_chunk > 0 {
+                        self.decode_state = DecodeState::ReadingPalette(bytes_left_in_chunk);
+                        continue
+                    }
+
+                    // Send the palette over to the predictor thread.
+                    self.predictor_thread_comm
+                        .sender
+                        .send(MainThreadToPredictorThreadMsg::SetPalette(self.palette.clone()))
+                        .unwrap();
+
+                    // Move past the CRC.
+                    try!(reader.seek(SeekFrom::Current(4)).map_err(PngError::Io));
+
+                    // Start looking for the image data.
+                    self.decode_state = DecodeState::LookingForImageData
                 }
                 DecodeState::DecodingData(bytes_left_in_chunk) => {
                     let stride = self.stride_for_lod(self.current_lod);
@@ -181,12 +232,10 @@ impl Image {
                             y: self.current_y,
                         });
                         self.current_y += 1;
-                        //println!("incrementing current Y: now at {}", self.current_y);
                         if self.current_y == self.height_for_lod(self.current_lod) {
                             self.current_y = 0;
                             if let LevelOfDetail::Adam7(ref mut current_lod) = self.current_lod {
                                 *current_lod += 1;
-                                //println!("incrementing LOD: now at {}", *current_lod);
                             }
                         }
                     }
@@ -217,30 +266,31 @@ impl Image {
 
     #[inline(never)]
     pub fn decode(&mut self) -> Result<(),PngError> {
-        let width_and_info_for_scanline_data_buffer_if_full = self.scanline_data_buffer_info
-                                                                  .as_ref()
-                                                                  .map(|info| {
-            (self.width_for_lod(info.lod), *info)
-        });
+        let (dimensions, color_depth, color_type) = match self.metadata {
+            None => return Err(PngError::NoMetadata),
+            Some(ref metadata) => (metadata.dimensions, metadata.color_depth, metadata.color_type),
+        };
         let scanline_buffer_offset = self.aligned_scanline_buffer_offset();
 
-        if let Some((scanline_width, scanline_info)) =
-                width_and_info_for_scanline_data_buffer_if_full {
+        if let Some(scanline_info) = self.scanline_data_buffer_info {
             let predictor = self.scanline_data_buffer[scanline_buffer_offset - 1];
-            //println!("predictor={}", predictor);
 
             let empty_scanline_data_buffer = match self.cached_scanline_data_buffers.pop() {
                 None => vec![],
                 Some(cached_scanline_data_buffer) => cached_scanline_data_buffer,
             };
-            let msg = MainThreadToPredictorThreadMsg::Predict(
-                scanline_width,
-                self.metadata.as_ref().unwrap().color_depth,
-                try!(Predictor::from_byte(predictor)),
-                mem::replace(&mut self.scanline_data_buffer, empty_scanline_data_buffer),
-                scanline_buffer_offset,
-                scanline_info.lod,
-                scanline_info.y);
+            let msg = MainThreadToPredictorThreadMsg::Predict(PredictionRequest {
+                width: dimensions.width,
+                height: dimensions.height,
+                color_depth: color_depth,
+                indexed_color: color_type == ColorType::Indexed,
+                predictor: try!(Predictor::from_byte(predictor)),
+                scanline_data: mem::replace(&mut self.scanline_data_buffer,
+                                            empty_scanline_data_buffer),
+                scanline_offset: scanline_buffer_offset,
+                scanline_lod: scanline_info.lod,
+                scanline_y: scanline_info.y,
+            });
             self.scanline_data_buffer_size = 0;
             self.predictor_thread_comm.sender.send(msg).unwrap();
             self.predictor_thread_comm.scanlines_in_progress += 1;
@@ -258,7 +308,6 @@ impl Image {
                                    -> Result<(),PngError> {
         match msg {
             PredictorThreadToMainThreadMsg::NoDataProviderError => Err(PngError::NoDataProvider),
-            PredictorThreadToMainThreadMsg::AlignmentError => Err(PngError::AlignmentError),
             PredictorThreadToMainThreadMsg::ScanlineComplete(y, lod, mut buffer) => {
                 buffer.clear();
                 self.cached_scanline_data_buffers.push(buffer);
@@ -268,7 +317,6 @@ impl Image {
                 }
                 if y >= self.scanlines_decoded_in_this_lod {
                     debug_assert!(self.last_decoded_lod == lod);
-                    //println!("bumped SDITL={}", y + 1);
                     self.scanlines_decoded_in_this_lod = y + 1
                 }
                 Ok(())
@@ -278,7 +326,6 @@ impl Image {
 
     #[inline(never)]
     pub fn wait_until_finished(&mut self) -> Result<(),PngError> {
-        //println!("wait_until_finish()");
         let height = self.metadata.as_ref().expect("No metadata yet!").dimensions.height;
 
         while (self.current_lod == LevelOfDetail::None ||
@@ -350,11 +397,6 @@ impl Image {
     }
 
     // FIXME(pcwalton): Unify with `InterlacingInfo` below!
-    fn stride_for_lod_and_color_depth(&self, lod: LevelOfDetail, color_depth: u8) -> u32 {
-        self.width_for_lod(lod) * ((color_depth / 8) as u32)
-    }
-
-    // FIXME(pcwalton): Unify with `InterlacingInfo` below!
     fn stride_for_lod(&self, lod: LevelOfDetail) -> u32 {
         let metadata = self.metadata.as_ref().unwrap();
         let color_depth = metadata.color_depth;
@@ -371,6 +413,7 @@ pub enum PngError {
     InvalidData(String),
     EntropyDecodingError(c_int),
     InvalidScanlinePredictor(u8),
+    NoMetadata,
     NoDataProvider,
     AlignmentError,
 }
@@ -396,6 +439,8 @@ pub enum AddDataResult {
 enum DecodeState {
     Start,
     LookingForImageData,
+    LookingForPalette,
+    ReadingPalette(u32),
     DecodingData(u32),
     Finished,
 }
@@ -436,7 +481,7 @@ impl Predictor {
                dest: &mut [u8],
                src: &[u8],
                prev: &[u8],
-               width: u32,
+               _: u32,
                color_depth: u8,
                stride: u8) {
         let color_depth = (color_depth / 8) as usize;
@@ -526,33 +571,46 @@ impl Predictor {
         debug_assert!(((dest.as_ptr() as usize) & 0xf) == 0);
         debug_assert!(((src.as_ptr() as usize) & 0xf) == 0);
         debug_assert!(((prev.as_ptr() as usize) & 0xf) == 0);
-        debug_assert!(color_depth == 32 || color_depth == 24);
+        debug_assert!(color_depth == 32 || color_depth == 24 || color_depth == 8);
 
-        let decode_scanline = match (self, color_depth, stride) {
-            (Predictor::None, 32, 4) => parng_predict_scanline_none_packed_32bpp,
-            (Predictor::None, 32, _) => parng_predict_scanline_none_strided_32bpp,
-            (Predictor::None, 24, 4) => parng_predict_scanline_none_packed_32bpp,
-            (Predictor::None, 24, _) => parng_predict_scanline_none_strided_32bpp,
-            (Predictor::Left, 32, 4) => parng_predict_scanline_left_packed_32bpp,
-            (Predictor::Left, 32, _) => parng_predict_scanline_left_strided_32bpp,
-            (Predictor::Left, 24, 4) => parng_predict_scanline_left_packed_24bpp,
-            (Predictor::Left, 24, _) => parng_predict_scanline_left_strided_24bpp,
-            (Predictor::Up, 32, 4) => parng_predict_scanline_up_packed_32bpp,
-            (Predictor::Up, 32, _) => parng_predict_scanline_up_strided_32bpp,
-            (Predictor::Up, 24, 4) => parng_predict_scanline_up_packed_24bpp,
-            (Predictor::Up, 24, _) => parng_predict_scanline_up_strided_24bpp,
-            (Predictor::Average, 32, _) => parng_predict_scanline_average_strided_32bpp,
-            (Predictor::Average, 24, _) => parng_predict_scanline_average_strided_24bpp,
-            (Predictor::Paeth, 32, _) => parng_predict_scanline_paeth_strided_32bpp,
-            (Predictor::Paeth, 24, _) => parng_predict_scanline_paeth_strided_24bpp,
+        let accelerated_implementation = match (self, color_depth, stride) {
+            (Predictor::None, 32, 4) => Some(parng_predict_scanline_none_packed_32bpp),
+            (Predictor::None, 32, _) => Some(parng_predict_scanline_none_strided_32bpp),
+            (Predictor::None, 24, 4) => Some(parng_predict_scanline_none_packed_24bpp),
+            (Predictor::None, 24, _) => Some(parng_predict_scanline_none_strided_24bpp),
+            (Predictor::None, 8, 4) => Some(parng_predict_scanline_none_packed_8bpp),
+            (Predictor::None, 8, _) => None,
+            (Predictor::Left, 32, 4) => Some(parng_predict_scanline_left_packed_32bpp),
+            (Predictor::Left, 32, _) => Some(parng_predict_scanline_left_strided_32bpp),
+            (Predictor::Left, 24, 4) => Some(parng_predict_scanline_left_packed_24bpp),
+            (Predictor::Left, 24, _) => Some(parng_predict_scanline_left_strided_24bpp),
+            (Predictor::Left, 8, 4) => Some(parng_predict_scanline_left_packed_8bpp),
+            (Predictor::Left, 8, _) => None,
+            (Predictor::Up, 32, 4) => Some(parng_predict_scanline_up_packed_32bpp),
+            (Predictor::Up, 32, _) => Some(parng_predict_scanline_up_strided_32bpp),
+            (Predictor::Up, 24, 4) => Some(parng_predict_scanline_up_packed_24bpp),
+            (Predictor::Up, 24, _) => Some(parng_predict_scanline_up_strided_24bpp),
+            (Predictor::Up, 8, 4) => Some(parng_predict_scanline_up_packed_8bpp),
+            (Predictor::Up, 8, _) => None,
+            (Predictor::Average, 32, _) => Some(parng_predict_scanline_average_strided_32bpp),
+            (Predictor::Average, 24, _) => Some(parng_predict_scanline_average_strided_24bpp),
+            (Predictor::Average, 8, _) => None,
+            (Predictor::Paeth, 32, _) => Some(parng_predict_scanline_paeth_strided_32bpp),
+            (Predictor::Paeth, 24, _) => Some(parng_predict_scanline_paeth_strided_24bpp),
+            (Predictor::Paeth, 8, _) => None,
             _ => panic!("Unsupported predictor/color depth combination!"),
         };
-        unsafe {
-            decode_scanline(dest.as_mut_ptr(),
-                            src.as_ptr(),
-                            prev.as_ptr(),
-                            (width as u64) * 4,
-                            stride as u64)
+        match accelerated_implementation {
+            Some(accelerated_implementation) => {
+                unsafe {
+                    accelerated_implementation(dest.as_mut_ptr(),
+                                               src.as_ptr(),
+                                               prev.as_ptr(),
+                                               (width as u64) * 4,
+                                               stride as u64)
+                }
+            }
+            None => self.predict(dest, src, prev, width, color_depth, stride),
         }
     }
 }
@@ -560,17 +618,28 @@ impl Predictor {
 enum MainThreadToPredictorThreadMsg {
     /// Sets a new `DataProvider`.
     SetDataProvider(Box<DataProvider>),
+    /// Sets a new palette.
+    SetPalette(Vec<u8>),
     /// Tells the data provider to extract data.
     ExtractData,
-    /// Width, color depth, predictor, scanline data, scanline offset, level of detail, and Y
-    /// coordinate.
-    Predict(u32, u8, Predictor, Vec<u8>, usize, LevelOfDetail, u32),
+    Predict(PredictionRequest),
+}
+
+struct PredictionRequest {
+    width: u32,
+    height: u32,
+    color_depth: u8,
+    indexed_color: bool,
+    predictor: Predictor,
+    scanline_data: Vec<u8>,
+    scanline_offset: usize,
+    scanline_lod: LevelOfDetail,
+    scanline_y: u32,
 }
 
 enum PredictorThreadToMainThreadMsg {
     ScanlineComplete(u32, LevelOfDetail, Vec<u8>),
     NoDataProviderError,
-    AlignmentError,
 }
 
 struct MainThreadToPredictorThreadComm {
@@ -606,16 +675,21 @@ pub enum DecodeResult {
 fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
                     receiver: Receiver<MainThreadToPredictorThreadMsg>) {
     let mut data_provider: Option<Box<DataProvider>> = None;
+    let mut palette: Option<Vec<u8>> = None;
     let mut blank = vec![];
     while let Ok(msg) = receiver.recv() {
         match msg {
-            MainThreadToPredictorThreadMsg::Predict(width,
-                                                    color_depth,
-                                                    predictor,
-                                                    scanline,
-                                                    scanline_offset,
-                                                    scanline_lod,
-                                                    scanline_y) => {
+            MainThreadToPredictorThreadMsg::Predict(PredictionRequest {
+                    width,
+                    height,
+                    color_depth,
+                    indexed_color,
+                    predictor,
+                    scanline_data: src,
+                    scanline_offset,
+                    scanline_lod,
+                    scanline_y
+            }) => {
                 let data_provider = match data_provider {
                     None => {
                         sender.send(PredictorThreadToMainThreadMsg::NoDataProviderError).unwrap();
@@ -624,66 +698,73 @@ fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
                     Some(ref mut data_provider) => data_provider,
                 };
 
-                //println!("Predict(scanline_offset={})", scanline_offset);
+                let dest_width_in_bytes = width as usize * 4;
+
                 let prev_scanline_y = if scanline_y == 0 {
                     None
                 } else {
                     Some(scanline_y - 1)
                 };
-                let ProvidedScanlines {
-                    scanline_to_read: prev,
-                    scanline_to_mutate: dest,
+                let ScanlineData {
+                    reference_scanline: mut prev,
+                    current_scanline: dest,
                     stride,
-                } = data_provider.read_and_mutate_scanlines(prev_scanline_y,
-                                                            scanline_y,
-                                                            scanline_lod);
+                } = data_provider.get_scanline_data(prev_scanline_y, scanline_y, scanline_lod);
                 let mut properly_aligned = true;
                 let prev = match prev {
-                    Some(ref prev) => {
+                    Some(ref mut prev) => {
                         if !slice_is_properly_aligned(prev) {
                             properly_aligned = false;
                         }
-                        &prev[..]
+                        &mut prev[..]
                     }
                     None => {
-                        blank.extend(iter::repeat(0).take(stride as usize));
-                        &blank[..]
+                        blank.extend(iter::repeat(0).take(dest_width_in_bytes as usize));
+                        &mut blank[..]
                     }
                 };
                 if !slice_is_properly_aligned(dest) {
                     properly_aligned = false;
                 }
-                properly_aligned = false;   // FIXME(pcwalton): !!!
 
-                match (predictor, properly_aligned) {
-                    (Predictor::None, true) |
-                    (Predictor::Left, true) |
-                    (Predictor::Up, true) |
-                    (Predictor::Average, true) |
-                    (Predictor::Paeth, true) => {
-                        predictor.accelerated_predict(&mut dest[..],
-                                                      &scanline[scanline_offset..],
-                                                      &prev[..],
-                                                      width,
-                                                      color_depth,
-                                                      stride)
-                    }
-                    _ => {
-                        predictor.predict(&mut dest[..],
-                                          &scanline[scanline_offset..],
-                                          &prev[..],
-                                          width,
-                                          color_depth,
-                                          stride)
+                if properly_aligned {
+                    predictor.accelerated_predict(&mut dest[..],
+                                                  &src[scanline_offset..],
+                                                  &prev[..],
+                                                  width,
+                                                  color_depth,
+                                                  stride)
+                } else {
+                    predictor.predict(&mut dest[0..dest_width_in_bytes],
+                                      &src[scanline_offset..],
+                                      &prev[0..dest_width_in_bytes],
+                                      width,
+                                      color_depth,
+                                      stride);
+                }
+
+                if indexed_color {
+                    let palette = palette.as_ref().expect("Indexed color but no palette?!");
+                    convert_indexed_to_rgba(&mut prev[0..dest_width_in_bytes], &palette[..]);
+                    if scanline_y == height - 1 {
+                        convert_indexed_to_rgba(&mut dest[0..dest_width_in_bytes], &palette[..])
                     }
                 }
 
                 sender.send(PredictorThreadToMainThreadMsg::ScanlineComplete(scanline_y,
                                                                              scanline_lod,
-                                                                             scanline)).unwrap()
+                                                                             src)).unwrap()
             }
             MainThreadToPredictorThreadMsg::SetDataProvider(new_data_provider) => {
                 data_provider = Some(new_data_provider)
+            }
+            MainThreadToPredictorThreadMsg::SetPalette(new_rgb_palette) => {
+                let mut new_rgba_palette = Vec::with_capacity(256 * 4);
+                for color in new_rgb_palette.chunks(3) {
+                    new_rgba_palette.extend_from_slice(&color[..]);
+                    new_rgba_palette.push(0xff);
+                }
+                palette = Some(new_rgba_palette)
             }
             MainThreadToPredictorThreadMsg::ExtractData => {
                 if let Some(ref mut data_provider) = mem::replace(&mut data_provider, None) {
@@ -694,6 +775,15 @@ fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
     }
 }
 
+/// TODO(pcwalton): Agner says latency is going down for `vpgatherdd`. I don't have a Skylake to
+/// test on, but maybe it's worth using that instruction on that model and later?
+fn convert_indexed_to_rgba(scanline: &mut [u8], palette: &[u8]) {
+    for color in scanline.chunks_mut(4) {
+        let start = 4 * (color[0] as usize);
+        color.clone_from_slice(&palette[start..(start + 4)])
+    }
+}
+
 #[allow(non_snake_case)]
 unsafe fn inflateInit(strm: *mut z_stream) -> c_int {
     let version = libz_sys::zlibVersion();
@@ -701,18 +791,18 @@ unsafe fn inflateInit(strm: *mut z_stream) -> c_int {
 }
 
 pub trait DataProvider : Send {
-    /// `scanline_to_read`, if present, will always be above `scanline_to_mutate`.
-    fn read_and_mutate_scanlines<'a>(&'a mut self,
-                                     scanline_to_read: Option<u32>,
-                                     scanline_to_mutate: u32,
-                                     lod: LevelOfDetail)
-                                     -> ProvidedScanlines;
+    /// `reference_scanline`, if present, will always be above `current_scanline`.
+    fn get_scanline_data<'a>(&'a mut self,
+                             reference_scanline: Option<u32>,
+                             current_scanline: u32,
+                             lod: LevelOfDetail)
+                             -> ScanlineData;
     fn extract_data(&mut self);
 }
 
-pub struct ProvidedScanlines<'a> {
-    pub scanline_to_read: Option<&'a [u8]>,
-    pub scanline_to_mutate: &'a mut [u8],
+pub struct ScanlineData<'a> {
+    pub reference_scanline: Option<&'a mut [u8]>,
+    pub current_scanline: &'a mut [u8],
     pub stride: u8,
 }
 
@@ -799,6 +889,21 @@ extern {
                                                  prev: *const u8,
                                                  length: u64,
                                                  stride: u64);
+    fn parng_predict_scanline_none_packed_24bpp(dest: *mut u8,
+                                                src: *const u8,
+                                                prev: *const u8,
+                                                length: u64,
+                                                stride: u64);
+    fn parng_predict_scanline_none_strided_24bpp(dest: *mut u8,
+                                                 src: *const u8,
+                                                 prev: *const u8,
+                                                 length: u64,
+                                                 stride: u64);
+    fn parng_predict_scanline_none_packed_8bpp(dest: *mut u8,
+                                               src: *const u8,
+                                               prev: *const u8,
+                                               length: u64,
+                                               stride: u64);
     fn parng_predict_scanline_left_packed_32bpp(dest: *mut u8,
                                                 src: *const u8,
                                                 prev: *const u8,
@@ -819,6 +924,11 @@ extern {
                                                  prev: *const u8,
                                                  length: u64,
                                                  stride: u64);
+    fn parng_predict_scanline_left_packed_8bpp(dest: *mut u8,
+                                               src: *const u8,
+                                               prev: *const u8,
+                                               length: u64,
+                                               stride: u64);
     fn parng_predict_scanline_up_packed_32bpp(dest: *mut u8,
                                               src: *const u8,
                                               prev: *const u8,
@@ -839,6 +949,11 @@ extern {
                                                prev: *const u8,
                                                length: u64,
                                                stride: u64);
+    fn parng_predict_scanline_up_packed_8bpp(dest: *mut u8,
+                                             src: *const u8,
+                                             prev: *const u8,
+                                             length: u64,
+                                             stride: u64);
     fn parng_predict_scanline_average_strided_32bpp(dest: *mut u8,
                                                     src: *const u8,
                                                     prev: *const u8,

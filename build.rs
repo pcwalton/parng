@@ -28,8 +28,8 @@ fn nasm(out_path: &str, in_path: &str) {
 fn main() {
     let out_dir = env::var("OUT_DIR").unwrap();
 
-    let predict_o = format!("{}/predict.o", out_dir);
-    nasm(&predict_o, "predict.asm");
+    let predict_o = format!("{}/prediction-x86_64-avx.o", out_dir);
+    nasm(&predict_o, "prediction-x86_64-avx.asm");
 
     Config::new().object(&predict_o).compile("libparngacceleration.a")
 }

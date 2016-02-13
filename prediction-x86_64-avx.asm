@@ -1,4 +1,6 @@
-; parng/predict.asm
+; parng/prediction-x86_64-avx.asm
+;
+; Copyright (c) 2016 Mozilla Foundation
 
 bits 64
 

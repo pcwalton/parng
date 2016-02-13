@@ -178,7 +178,7 @@ impl Image {
                         let metadata = self.metadata.as_ref().expect("No metadata?!");
                         (metadata.dimensions.width, metadata.color_depth)
                     };
-                    let bytes_per_pixel = (color_depth / 8) as u32;
+                    let bytes_per_pixel = bytes_per_pixel(color_depth) as u32;
                     let stride = width * bytes_per_pixel * bytes_per_pixel /
                         InterlacingInfo::new(0, color_depth, self.current_lod).stride as u32;
                     if self.scanline_data_buffer_info.is_some() {
@@ -474,6 +474,7 @@ impl UninitializedExtension for Vec<u8> {
     }
 }
 
+#[inline]
 pub fn align(address: usize) -> usize {
     let remainder = address % 16;
     if remainder == 0 {
@@ -481,6 +482,11 @@ pub fn align(address: usize) -> usize {
     } else {
         address + 16 - remainder
     }
+}
+
+#[inline]
+pub fn bytes_per_pixel(color_depth: u8) -> u8 {
+    cmp::max(color_depth / 8, 1)
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -493,7 +499,7 @@ pub struct InterlacingInfo {
 impl InterlacingInfo {
     pub fn new(y: u32, color_depth: u8, lod: LevelOfDetail) -> InterlacingInfo {
         let y_scale_factor = InterlacingInfo::y_scale_factor(lod);
-        let color_depth = color_depth / 8;
+        let bytes_per_pixel = bytes_per_pixel(color_depth);
         let (y_offset, stride, x_offset) = match lod {
             LevelOfDetail::None => (0, 1, 0),
             LevelOfDetail::Adam7(0) => (0, 8, 0),
@@ -507,8 +513,8 @@ impl InterlacingInfo {
         };
         InterlacingInfo {
             y: y * y_scale_factor + y_offset,
-            stride: stride * color_depth,
-            offset: x_offset * color_depth,
+            stride: stride * bytes_per_pixel,
+            offset: x_offset * bytes_per_pixel,
         }
     }
 

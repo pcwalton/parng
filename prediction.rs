@@ -6,6 +6,7 @@ use DataProvider;
 use LevelOfDetail;
 use PngError;
 use ScanlineData;
+use bytes_per_pixel;
 use std::iter;
 use std::mem;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -135,9 +136,13 @@ fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
 
                 if indexed_color {
                     let palette = palette.as_ref().expect("Indexed color but no palette?!");
-                    convert_indexed_to_rgba(&mut prev[0..dest_width_in_bytes], &palette[..]);
+                    convert_indexed_to_rgba(&mut prev[0..dest_width_in_bytes],
+                                            &palette[..],
+                                            color_depth);
                     if scanline_y == height - 1 {
-                        convert_indexed_to_rgba(&mut dest[0..dest_width_in_bytes], &palette[..])
+                        convert_indexed_to_rgba(&mut dest[0..dest_width_in_bytes],
+                                                &palette[..],
+                                                color_depth)
                     }
                 }
 
@@ -194,7 +199,7 @@ impl Predictor {
                _: u32,
                color_depth: u8,
                stride: u8) {
-        let color_depth = (color_depth / 8) as usize;
+        let color_depth = bytes_per_pixel(color_depth) as usize;
         let mut a: [u8; 4] = [0; 4];
         let mut c: [u8; 4] = [0; 4];
         let stride = stride as usize;
@@ -281,33 +286,34 @@ impl Predictor {
         debug_assert!(((dest.as_ptr() as usize) & 0xf) == 0);
         debug_assert!(((src.as_ptr() as usize) & 0xf) == 0);
         debug_assert!(((prev.as_ptr() as usize) & 0xf) == 0);
-        debug_assert!(color_depth == 32 || color_depth == 24 || color_depth == 8);
+        debug_assert!([32, 24, 8, 4, 2, 1].contains(&color_depth));
 
-        let accelerated_implementation = match (self, color_depth, stride) {
-            (Predictor::None, 32, 4) => Some(parng_predict_scanline_none_packed_32bpp),
-            (Predictor::None, 32, _) => Some(parng_predict_scanline_none_strided_32bpp),
-            (Predictor::None, 24, 4) => Some(parng_predict_scanline_none_packed_24bpp),
-            (Predictor::None, 24, _) => Some(parng_predict_scanline_none_strided_24bpp),
-            (Predictor::None, 8, 4) => Some(parng_predict_scanline_none_packed_8bpp),
-            (Predictor::None, 8, _) => None,
-            (Predictor::Left, 32, 4) => Some(parng_predict_scanline_left_packed_32bpp),
-            (Predictor::Left, 32, _) => Some(parng_predict_scanline_left_strided_32bpp),
-            (Predictor::Left, 24, 4) => Some(parng_predict_scanline_left_packed_24bpp),
-            (Predictor::Left, 24, _) => Some(parng_predict_scanline_left_strided_24bpp),
-            (Predictor::Left, 8, 4) => Some(parng_predict_scanline_left_packed_8bpp),
-            (Predictor::Left, 8, _) => None,
-            (Predictor::Up, 32, 4) => Some(parng_predict_scanline_up_packed_32bpp),
-            (Predictor::Up, 32, _) => Some(parng_predict_scanline_up_strided_32bpp),
-            (Predictor::Up, 24, 4) => Some(parng_predict_scanline_up_packed_24bpp),
-            (Predictor::Up, 24, _) => Some(parng_predict_scanline_up_strided_24bpp),
-            (Predictor::Up, 8, 4) => Some(parng_predict_scanline_up_packed_8bpp),
-            (Predictor::Up, 8, _) => None,
-            (Predictor::Average, 32, _) => Some(parng_predict_scanline_average_strided_32bpp),
-            (Predictor::Average, 24, _) => Some(parng_predict_scanline_average_strided_24bpp),
-            (Predictor::Average, 8, _) => None,
-            (Predictor::Paeth, 32, _) => Some(parng_predict_scanline_paeth_strided_32bpp),
-            (Predictor::Paeth, 24, _) => Some(parng_predict_scanline_paeth_strided_24bpp),
-            (Predictor::Paeth, 8, _) => None,
+        let bytes_per_pixel = bytes_per_pixel(color_depth);
+        let accelerated_implementation = match (self, bytes_per_pixel, stride) {
+            (Predictor::None, 4, 4) => Some(parng_predict_scanline_none_packed_32bpp),
+            (Predictor::None, 4, _) => Some(parng_predict_scanline_none_strided_32bpp),
+            (Predictor::None, 3, 4) => Some(parng_predict_scanline_none_packed_24bpp),
+            (Predictor::None, 3, _) => Some(parng_predict_scanline_none_strided_24bpp),
+            (Predictor::None, 1, 4) => Some(parng_predict_scanline_none_packed_8bpp),
+            (Predictor::None, 1, _) => None,
+            (Predictor::Left, 4, 4) => Some(parng_predict_scanline_left_packed_32bpp),
+            (Predictor::Left, 4, _) => Some(parng_predict_scanline_left_strided_32bpp),
+            (Predictor::Left, 3, 4) => Some(parng_predict_scanline_left_packed_24bpp),
+            (Predictor::Left, 3, _) => Some(parng_predict_scanline_left_strided_24bpp),
+            (Predictor::Left, 1, 4) => Some(parng_predict_scanline_left_packed_8bpp),
+            (Predictor::Left, 1, _) => None,
+            (Predictor::Up, 4, 4) => Some(parng_predict_scanline_up_packed_32bpp),
+            (Predictor::Up, 4, _) => Some(parng_predict_scanline_up_strided_32bpp),
+            (Predictor::Up, 3, 4) => Some(parng_predict_scanline_up_packed_24bpp),
+            (Predictor::Up, 3, _) => Some(parng_predict_scanline_up_strided_24bpp),
+            (Predictor::Up, 1, 4) => Some(parng_predict_scanline_up_packed_8bpp),
+            (Predictor::Up, 1, _) => None,
+            (Predictor::Average, 4, _) => Some(parng_predict_scanline_average_strided_32bpp),
+            (Predictor::Average, 3, _) => Some(parng_predict_scanline_average_strided_24bpp),
+            (Predictor::Average, 1, _) => None,
+            (Predictor::Paeth, 4, _) => Some(parng_predict_scanline_paeth_strided_32bpp),
+            (Predictor::Paeth, 3, _) => Some(parng_predict_scanline_paeth_strided_24bpp),
+            (Predictor::Paeth, 1, _) => None,
             _ => panic!("Unsupported predictor/color depth combination!"),
         };
         match accelerated_implementation {
@@ -327,10 +333,19 @@ impl Predictor {
 
 /// TODO(pcwalton): Agner says latency is going down for `vpgatherdd`. I don't have a Skylake to
 /// test on, but maybe it's worth using that instruction on that model and later?
-fn convert_indexed_to_rgba(scanline: &mut [u8], palette: &[u8]) {
-    for color in scanline.chunks_mut(4) {
-        let start = 4 * (color[0] as usize);
-        color.clone_from_slice(&palette[start..(start + 4)])
+fn convert_indexed_to_rgba(scanline: &mut [u8], palette: &[u8], color_depth: u8) {
+    debug_assert!(color_depth >= 1 && color_depth <= 8);
+    for packed_colors in scanline.chunks_mut(4 * 8 / color_depth as usize) {
+        let packed_color = packed_colors[0];
+        for color_index_in_byte in 0..(8 / color_depth) {
+            let color = (packed_color >> (color_depth * color_index_in_byte)) &
+                (1 << color_depth - 1);
+            let src_start = 4 * color as usize;
+            let src_end = src_start + 4;
+            let dest_start = 4 * color_index_in_byte as usize;
+            let dest_end = dest_start + 4;
+            packed_colors[dest_start..dest_end].clone_from_slice(&palette[src_start..src_end])
+        }
     }
 }
 

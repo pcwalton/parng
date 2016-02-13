@@ -48,9 +48,9 @@ impl DataProvider for SlurpingDataProvider {
                              lod: LevelOfDetail)
                              -> ScanlineData {
         let reference_scanline = reference_scanline.map(|reference_scanline| {
-            InterlacingInfo::new(reference_scanline, lod)
+            InterlacingInfo::new(reference_scanline, 32, lod)
         });
-        let current_scanline = InterlacingInfo::new(current_scanline, lod);
+        let current_scanline = InterlacingInfo::new(current_scanline, 32, lod);
 
         let aligned_stride = self.aligned_stride;
         let split_point = aligned_stride * (current_scanline.y as usize);

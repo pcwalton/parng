@@ -29,12 +29,16 @@ global parng_predict_scanline_paeth_strided_24bpp
     %define prev r8
     %define length r9
     %define stride r10
+
+    %define prolog mov r10,[rsp+40]
 %else
     %define dest rdi
     %define src rsi
     %define prev rdx
     %define length rcx
     %define stride r8
+
+    %define prolog
 %endif
 
 section .text
@@ -93,6 +97,7 @@ section .text
 ; FIXME(pcwalton): We don't need two adds here, but I'm leaving them in in the chance that we can
 ; factor out the loop into a macro for safety.
 parng_predict_scanline_none_packed_32bpp:
+    prolog
     xor rax,rax
 .loop:
     movdqa xmm0,[src]
@@ -109,10 +114,11 @@ parng_predict_scanline_none_packed_32bpp:
 ;                                           uint64_t length,
 ;                                           uint64_t stride)
 parng_predict_scanline_none_strided_32bpp:
+    prolog
     xor rax,rax
 .loop:
-    mov r10,[src]
-    mov [dest+rax],r10
+    mov r11,[src]
+    mov [dest+rax],r11
     add rax,stride
     add src,4
     cmp rax,length
@@ -125,6 +131,7 @@ parng_predict_scanline_none_strided_32bpp:
 ;                                          uint64_t length,
 ;                                          uint64_t stride)
 parng_predict_scanline_none_packed_24bpp:
+    prolog
     load_24bpp_to_32bpp_shuffle_mask xmm1
     xor rax,rax
 .loop:
@@ -143,6 +150,7 @@ parng_predict_scanline_none_packed_24bpp:
 ;                                           uint64_t length,
 ;                                           uint64_t stride)
 parng_predict_scanline_none_strided_24bpp:
+    prolog
     xor rax,rax
 .loop:
     mov r10d,[src]
@@ -160,6 +168,7 @@ parng_predict_scanline_none_strided_24bpp:
 ;                                         uint64_t length,
 ;                                         uint64_t stride)
 parng_predict_scanline_none_packed_8bpp:
+    prolog
     load_8bpp_to_32bpp_shuffle_mask xmm1
     xor rax,rax
 .loop:
@@ -198,6 +207,7 @@ parng_predict_scanline_none_packed_8bpp:
 ; FIXME(pcwalton): We don't need two adds here, but I'm leaving them in in the chance that we can
 ; factor out the loop into a macro for safety.
 parng_predict_scanline_left_packed_32bpp:
+    prolog
     xorps xmm0,xmm0
     xor rax,rax
 .loop:
@@ -217,6 +227,7 @@ parng_predict_scanline_left_packed_32bpp:
 ; FIXME(pcwalton): We don't need two adds here, but I'm leaving them in in the chance that we can
 ; factor out the loop into a macro for safety.
 parng_predict_scanline_left_strided_32bpp:
+    prolog
     xorps xmm0,xmm0
     xor rax,rax
 .loop:
@@ -235,6 +246,7 @@ parng_predict_scanline_left_strided_32bpp:
 ;                                          uint64_t length,
 ;                                          uint64_t stride)
 parng_predict_scanline_left_packed_24bpp:
+    prolog
     load_24bpp_to_32bpp_shuffle_mask xmm2       ; xmm2 = 24bpp → 32bpp shuffle mask
     load_32bpp_opaque_alpha_mask xmm3           ; xmm3 = opaque alpha mask
     xorps xmm0,xmm0                             ; xmm0 = a = 0
@@ -257,6 +269,7 @@ parng_predict_scanline_left_packed_24bpp:
 ;                                           uint64_t length,
 ;                                           uint64_t stride)
 parng_predict_scanline_left_strided_24bpp:
+    prolog
     load_24bpp_to_32bpp_shuffle_mask xmm2       ; xmm2 = 24bpp → 32bpp shuffle mask
     load_32bpp_opaque_alpha_mask xmm3           ; xmm3 = opaque alpha mask
     xorps xmm0,xmm0                             ; xmm0 = a = 0
@@ -278,6 +291,7 @@ parng_predict_scanline_left_strided_24bpp:
 ;                                         uint64_t length,
 ;                                         uint64_t stride)
 parng_predict_scanline_left_packed_8bpp:
+    prolog
     load_8bpp_to_32bpp_shuffle_mask xmm2        ; xmm2 = 8bpp → 32bpp shuffle mask
     xorps xmm0,xmm0                             ; xmm0 = a = 0
     xor rax,rax
@@ -298,6 +312,7 @@ parng_predict_scanline_left_packed_8bpp:
 ;                                        uint64_t length,
 ;                                        uint64_t stride)
 parng_predict_scanline_up_packed_32bpp:
+    prolog
     xor rax,rax
 .loop:
     movdqa xmm0,[prev+rax]                      ; xmm0 = prev
@@ -315,6 +330,7 @@ parng_predict_scanline_up_packed_32bpp:
 ;                                         uint64_t length,
 ;                                         uint64_t stride)
 parng_predict_scanline_up_strided_32bpp:
+    prolog
     xor rax,rax
 .loop:
     movd xmm0,[prev+rax]                        ; xmm0 = prev
@@ -335,6 +351,7 @@ parng_predict_scanline_up_strided_32bpp:
 ;
 ; There is no need to make the alpha opaque here as long as the previous scanline had opaque alpha.
 parng_predict_scanline_up_packed_24bpp:
+    prolog
     load_24bpp_to_32bpp_shuffle_mask xmm2       ; xmm2 = 24bpp → 32bpp shuffle mask
     xor rax,rax
 .loop:
@@ -357,6 +374,7 @@ parng_predict_scanline_up_packed_24bpp:
 ;
 ; There is no need to make the alpha opaque here as long as the previous scanline had opaque alpha.
 parng_predict_scanline_up_strided_24bpp:
+    prolog
     load_24bpp_to_32bpp_shuffle_mask xmm2       ; xmm2 = 24bpp → 32bpp shuffle mask
     xor rax,rax
 .loop:
@@ -377,6 +395,7 @@ parng_predict_scanline_up_strided_24bpp:
 ;                                       uint64_t length,
 ;                                       uint64_t stride)
 parng_predict_scanline_up_packed_8bpp:
+    prolog
     load_8bpp_to_32bpp_shuffle_mask xmm2        ; xmm2 = 24bpp → 32bpp shuffle mask
     xor rax,rax
 .loop:
@@ -418,6 +437,7 @@ parng_predict_scanline_up_packed_8bpp:
 ;                                              uint64_t length,
 ;                                              uint64_t stride)
 parng_predict_scanline_average_strided_32bpp:
+    prolog
     load_64bpp_to_32bpp_shuffle_mask xmm3       ; rax = 64bpp → 32bpp shuffle mask
     xorps xmm0,xmm0                             ; xmm0 = a = 0
     xor rax,rax
@@ -435,6 +455,7 @@ parng_predict_scanline_average_strided_32bpp:
 ;                                              uint64_t length,
 ;                                              uint64_t stride)
 parng_predict_scanline_average_strided_24bpp:
+    prolog
     mov rax,0x8080808080040200                  ; rax = 64bpp → 32bpp shuffle mask (no alpha!)
     movq xmm3,rax                               ; xmm3 = 64bpp → 32bpp shuffle mask (no alpha!)
     xorps xmm0,xmm0                             ; xmm0 = a = 0
@@ -500,6 +521,7 @@ parng_predict_scanline_average_strided_24bpp:
 ;                                            uint64_t length,
 ;                                            uint64_t stride)
 parng_predict_scanline_paeth_strided_32bpp:
+    prolog
     load_64bpp_to_32bpp_shuffle_mask xmm10  ; xmm10 = 64bpp → 32bpp shuffle mask
     xorps xmm0,xmm0             ; xmm0 = a = 0
     xorps xmm2,xmm2             ; xmm2 = c = 0
@@ -518,6 +540,7 @@ parng_predict_scanline_paeth_strided_32bpp:
 ;                                            uint64_t length,
 ;                                            uint64_t stride)
 parng_predict_scanline_paeth_strided_24bpp:
+    prolog
     load_64bpp_to_32bpp_opaque_alpha_shuffle_mask xmm10 ; xmm10 = 64bpp → 32bpp shuffle mask
     xorps xmm0,xmm0             ; xmm0 = a = 0
     xorps xmm2,xmm2             ; xmm2 = c = 0

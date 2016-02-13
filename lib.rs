@@ -170,7 +170,13 @@ impl Image {
                     self.decode_state = DecodeState::LookingForImageData
                 }
                 DecodeState::DecodingData(bytes_left_in_chunk) => {
-                    let stride = self.stride_for_lod(self.current_lod);
+                    let (width, color_depth) = {
+                        let metadata = self.metadata.as_ref().expect("No metadata?!");
+                        (metadata.dimensions.width, metadata.color_depth)
+                    };
+                    let bytes_per_pixel = (color_depth / 8) as u32;
+                    let stride = width * bytes_per_pixel * bytes_per_pixel /
+                        InterlacingInfo::new(0, color_depth, self.current_lod).stride as u32;
                     if self.scanline_data_buffer_info.is_some() {
                         return Ok(AddDataResult::BufferFull)
                     }
@@ -232,10 +238,16 @@ impl Image {
                             y: self.current_y,
                         });
                         self.current_y += 1;
-                        if self.current_y == self.height_for_lod(self.current_lod) {
+                        let height = self.metadata
+                                         .as_ref()
+                                         .expect("No metadata?!")
+                                         .dimensions
+                                         .height;
+                        let y_scale_factor = InterlacingInfo::y_scale_factor(self.current_lod);
+                        if self.current_y == height / y_scale_factor {
                             self.current_y = 0;
                             if let LevelOfDetail::Adam7(ref mut current_lod) = self.current_lod {
-                                *current_lod += 1;
+                                *current_lod += 1
                             }
                         }
                     }
@@ -368,39 +380,6 @@ impl Image {
         } else {
             offset
         }
-    }
-    
-    // FIXME(pcwalton): Unify with `InterlacingInfo` below!
-    fn width_for_lod(&self, lod: LevelOfDetail) -> u32 {
-        let metadata = self.metadata.as_ref().unwrap();
-        let image_width = metadata.dimensions.width;
-        match lod {
-            LevelOfDetail::Adam7(0) | LevelOfDetail::Adam7(1) => image_width / 8,
-            LevelOfDetail::Adam7(2) | LevelOfDetail::Adam7(3) => image_width / 4,
-            LevelOfDetail::Adam7(4) | LevelOfDetail::Adam7(5) => image_width / 2,
-            _ => image_width,
-        }
-    }
-
-    // FIXME(pcwalton): Unify with `InterlacingInfo` below!
-    fn height_for_lod(&self, lod: LevelOfDetail) -> u32 {
-        let metadata = self.metadata.as_ref().unwrap();
-        let image_height = metadata.dimensions.height;
-        match lod {
-            LevelOfDetail::Adam7(0) |
-            LevelOfDetail::Adam7(1) |
-            LevelOfDetail::Adam7(2) => image_height / 8,
-            LevelOfDetail::Adam7(3) | LevelOfDetail::Adam7(4) => image_height / 4,
-            LevelOfDetail::Adam7(5) => image_height / 2,
-            _ => image_height,
-        }
-    }
-
-    // FIXME(pcwalton): Unify with `InterlacingInfo` below!
-    fn stride_for_lod(&self, lod: LevelOfDetail) -> u32 {
-        let metadata = self.metadata.as_ref().unwrap();
-        let color_depth = metadata.color_depth;
-        self.width_for_lod(lod) * ((color_depth / 8) as u32)
     }
 }
 
@@ -838,6 +817,7 @@ fn address_is_properly_aligned(address: usize) -> bool {
     (address & 0xf) == 0
 }
 
+#[derive(Copy, Clone, Debug)]
 pub struct InterlacingInfo {
     pub y: u32,
     pub stride: u8,
@@ -845,22 +825,34 @@ pub struct InterlacingInfo {
 }
 
 impl InterlacingInfo {
-    pub fn new(y: u32, lod: LevelOfDetail) -> InterlacingInfo {
-        let (y, stride, offset) = match lod {
-            LevelOfDetail::None => (y, 4, 0),
-            LevelOfDetail::Adam7(0) => (y * 8 + 0, 8 * 4, 0 * 4),
-            LevelOfDetail::Adam7(1) => (y * 8 + 0, 8 * 4, 4 * 4),
-            LevelOfDetail::Adam7(2) => (y * 8 + 4, 4 * 4, 0 * 4),
-            LevelOfDetail::Adam7(3) => (y * 4 + 0, 4 * 4, 2 * 4),
-            LevelOfDetail::Adam7(4) => (y * 4 + 2, 2 * 4, 0 * 4),
-            LevelOfDetail::Adam7(5) => (y * 2 + 0, 2 * 4, 1 * 4),
-            LevelOfDetail::Adam7(6) => (y * 2 + 1, 1 * 4, 0 * 4),
+    pub fn new(y: u32, color_depth: u8, lod: LevelOfDetail) -> InterlacingInfo {
+        let y_scale_factor = InterlacingInfo::y_scale_factor(lod);
+        let color_depth = color_depth / 8;
+        let (y_offset, stride, x_offset) = match lod {
+            LevelOfDetail::None => (0, 1, 0),
+            LevelOfDetail::Adam7(0) => (0, 8, 0),
+            LevelOfDetail::Adam7(1) => (0, 8, 4),
+            LevelOfDetail::Adam7(2) => (4, 4, 0),
+            LevelOfDetail::Adam7(3) => (0, 4, 2),
+            LevelOfDetail::Adam7(4) => (2, 2, 0),
+            LevelOfDetail::Adam7(5) => (0, 2, 1),
+            LevelOfDetail::Adam7(6) => (1, 1, 0),
             LevelOfDetail::Adam7(_) => panic!("Unsupported Adam7 level of detail!"),
         };
         InterlacingInfo {
-            y: y,
-            stride: stride,
-            offset: offset,
+            y: y * y_scale_factor + y_offset,
+            stride: stride * color_depth,
+            offset: x_offset * color_depth,
+        }
+    }
+
+    fn y_scale_factor(lod: LevelOfDetail) -> u32 {
+        match lod {
+            LevelOfDetail::None => 1,
+            LevelOfDetail::Adam7(0) | LevelOfDetail::Adam7(1) | LevelOfDetail::Adam7(2) => 8,
+            LevelOfDetail::Adam7(3) | LevelOfDetail::Adam7(4) => 4,
+            LevelOfDetail::Adam7(5) | LevelOfDetail::Adam7(6) => 2,
+            LevelOfDetail::Adam7(_) => panic!("Unsupported Adam7 level of detail!"),
         }
     }
 }

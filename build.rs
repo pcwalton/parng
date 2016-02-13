@@ -6,6 +6,16 @@ use gcc::Config;
 use std::env;
 use std::process::Command;
 
+#[cfg(target_os="windows")]
+fn nasm(out_path: &str, in_path: &str) {
+    Command::new(&format!("nasm")).arg("-f").arg("win64")
+                                  .arg("-o").arg(out_path)
+                                  .arg(in_path)
+                                  .status()
+                                  .unwrap();
+}
+
+#[cfg(target_os="macos")]
 fn nasm(out_path: &str, in_path: &str) {
     Command::new(&format!("nasm")).arg("-f").arg("macho64")
                                   .arg("--prefix").arg("_")

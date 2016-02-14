@@ -13,12 +13,13 @@ use libc::c_int;
 use libz_sys::{Z_ERRNO, Z_NO_FLUSH, Z_OK, Z_STREAM_END, z_stream};
 use metadata::{ChunkHeader, ColorType, InterlaceMethod, Metadata};
 use prediction::{MainThreadToPredictorThreadComm, MainThreadToPredictorThreadMsg};
-use prediction::{PredictionRequest, Predictor, PredictorThreadToMainThreadMsg};
+use prediction::{PredictionRequest, Predictor, PredictorThreadToMainThreadMsg, ScanlineToPredict};
 use std::cmp;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::mem;
 
 const BUFFER_SIZE: usize = 16384;
+const PIXELS_PER_PREDICTION_CHUNK: u32 = 1024;
 
 pub mod metadata;
 mod prediction;
@@ -33,8 +34,8 @@ pub struct Image {
     scanline_data_buffer_size: usize,
     cached_scanline_data_buffers: Vec<Vec<u8>>,
 
-    /// If `None`, the buffered scanline isn't full yet.
-    scanline_data_buffer_info: Option<BufferedScanlineInfo>,
+    /// There will be one entry in this vector per buffered scanline.
+    scanline_data_buffer_info: Vec<BufferedScanlineInfo>,
 
     current_y: u32,
     current_lod: LevelOfDetail,
@@ -67,7 +68,7 @@ impl Image {
             palette: vec![],
             scanline_data_buffer: vec![],
             scanline_data_buffer_size: 0,
-            scanline_data_buffer_info: None,
+            scanline_data_buffer_info: vec![],
             cached_scanline_data_buffers: vec![],
             current_y: 0,
             current_lod: LevelOfDetail::None,
@@ -181,7 +182,8 @@ impl Image {
                     let bytes_per_pixel = (color_depth / 8) as u32;
                     let stride = width * bytes_per_pixel * bytes_per_pixel /
                         InterlacingInfo::new(0, color_depth, self.current_lod).stride as u32;
-                    if self.scanline_data_buffer_info.is_some() {
+                    let scanlines_to_buffer = self.scanlines_to_buffer();
+                    if self.scanline_data_buffer_info.len() >= scanlines_to_buffer as usize {
                         return Ok(AddDataResult::BufferFull)
                     }
 
@@ -217,7 +219,8 @@ impl Image {
                             // handle any amount of padding on both ends.
                             self.scanline_data_buffer
                                 .extend_with_uninitialized(1 + (stride as usize) + 32);
-                            let offset = self.aligned_scanline_buffer_offset();
+                            let offset =
+                                aligned_scanline_buffer_offset(&self.scanline_data_buffer[..]);
                             let original_size = self.scanline_data_buffer_size;
                             self.z_stream.avail_out = 1 + stride - (original_size as u32);
                             self.z_stream.next_out =
@@ -235,9 +238,17 @@ impl Image {
                         }
                     }
 
-                    // Advance the Y position if necessary.
+                    // Save the buffer and advance the Y position if necessary.
                     if self.scanline_data_buffer_size == 1 + stride as usize {
-                        self.scanline_data_buffer_info = Some(BufferedScanlineInfo {
+                        let empty_scanline_data_buffer = self.cached_scanline_data_buffers
+                                                             .pop()
+                                                             .unwrap_or(vec![]);
+                        let scanline_data = mem::replace(&mut self.scanline_data_buffer,
+                                                         empty_scanline_data_buffer);
+                        self.scanline_data_buffer_size = 0;
+
+                        self.scanline_data_buffer_info.push(BufferedScanlineInfo {
+                            data: scanline_data,
                             lod: self.current_lod,
                             y: self.current_y,
                         });
@@ -248,7 +259,8 @@ impl Image {
                                          .dimensions
                                          .height;
                         let y_scale_factor = InterlacingInfo::y_scale_factor(self.current_lod);
-                        if self.current_y == height / y_scale_factor {
+                        if self.current_y == height / y_scale_factor &&
+                                !self.finished_entropy_decoding() {
                             self.current_y = 0;
                             if let LevelOfDetail::Adam7(ref mut current_lod) = self.current_lod {
                                 *current_lod += 1
@@ -286,31 +298,34 @@ impl Image {
             None => return Err(PngError::NoMetadata),
             Some(ref metadata) => (metadata.dimensions, metadata.color_depth, metadata.color_type),
         };
-        let scanline_buffer_offset = self.aligned_scanline_buffer_offset();
 
-        if let Some(scanline_info) = self.scanline_data_buffer_info {
-            let predictor = self.scanline_data_buffer[scanline_buffer_offset - 1];
-
-            let empty_scanline_data_buffer = match self.cached_scanline_data_buffers.pop() {
-                None => vec![],
-                Some(cached_scanline_data_buffer) => cached_scanline_data_buffer,
-            };
-            let msg = MainThreadToPredictorThreadMsg::Predict(PredictionRequest {
+        let buffered_scanline_count = self.scanline_data_buffer_info.len() as u32;
+        if buffered_scanline_count >= self.scanlines_to_buffer() ||
+                self.finished_entropy_decoding() {
+            let mut request = PredictionRequest {
                 width: dimensions.width,
                 height: dimensions.height,
                 color_depth: color_depth,
                 indexed_color: color_type == ColorType::Indexed,
-                predictor: try!(Predictor::from_byte(predictor)),
-                scanline_data: mem::replace(&mut self.scanline_data_buffer,
-                                            empty_scanline_data_buffer),
-                scanline_offset: scanline_buffer_offset,
-                scanline_lod: scanline_info.lod,
-                scanline_y: scanline_info.y,
-            });
-            self.scanline_data_buffer_size = 0;
-            self.predictor_thread_comm.sender.send(msg).unwrap();
-            self.predictor_thread_comm.scanlines_in_progress += 1;
-            self.scanline_data_buffer_info = None;
+                scanlines: Vec::with_capacity(buffered_scanline_count as usize),
+            };
+            for scanline_info in self.scanline_data_buffer_info.drain(..) {
+                let scanline_buffer_offset = aligned_scanline_buffer_offset(&scanline_info.data);
+                let predictor = scanline_info.data[scanline_buffer_offset - 1];
+                request.scanlines.push(ScanlineToPredict {
+                    predictor: try!(Predictor::from_byte(predictor)),
+                    data: scanline_info.data,
+                    offset: scanline_buffer_offset,
+                    lod: scanline_info.lod,
+                    y: scanline_info.y,
+                })
+            }
+
+            self.predictor_thread_comm
+                .sender
+                .send(MainThreadToPredictorThreadMsg::Predict(request))
+                .unwrap();
+            self.predictor_thread_comm.scanlines_in_progress += buffered_scanline_count;
         }
 
         while let Ok(msg) = self.predictor_thread_comm.receiver.try_recv() {
@@ -342,11 +357,7 @@ impl Image {
 
     #[inline(never)]
     pub fn wait_until_finished(&mut self) -> Result<(),PngError> {
-        let height = self.metadata.as_ref().expect("No metadata yet!").dimensions.height;
-
-        while (self.current_lod == LevelOfDetail::None ||
-                   self.current_lod < LevelOfDetail::Adam7(6)) &&
-                self.scanlines_decoded_in_this_lod < height {
+        while !self.finished_decoding_altogether() {
             let msg = self.predictor_thread_comm
                           .receiver
                           .recv()
@@ -354,6 +365,18 @@ impl Image {
             try!(self.handle_predictor_thread_msg(msg));
         }
         Ok(())
+    }
+
+    fn finished_entropy_decoding(&self) -> bool {
+        let height = self.metadata.as_ref().expect("No metadata yet!").dimensions.height;
+        (self.current_lod == LevelOfDetail::None || self.current_lod == LevelOfDetail::Adam7(6)) &&
+            self.current_y >= height
+    }
+
+    fn finished_decoding_altogether(&self) -> bool {
+        let height = self.metadata.as_ref().expect("No metadata yet!").dimensions.height;
+        (self.current_lod == LevelOfDetail::None || self.current_lod == LevelOfDetail::Adam7(6)) &&
+            self.scanlines_decoded_in_this_lod >= height
     }
 
     #[inline(never)]
@@ -377,13 +400,9 @@ impl Image {
         &self.metadata
     }
 
-    fn aligned_scanline_buffer_offset(&self) -> usize {
-        let offset = aligned_offset_for_slice(&self.scanline_data_buffer[..]);
-        if offset == 0 {
-            16
-        } else {
-            offset
-        }
+    fn scanlines_to_buffer(&self) -> u32 {
+        let width = self.metadata.as_ref().expect("No metadata?!").dimensions.width;
+        cmp::max(PIXELS_PER_PREDICTION_CHUNK / width, 1)
     }
 }
 
@@ -435,6 +454,15 @@ fn aligned_offset_for_slice(slice: &[u8]) -> usize {
         0
     } else {
         16 - remainder
+    }
+}
+
+fn aligned_scanline_buffer_offset(buffer: &[u8]) -> usize {
+    let offset = aligned_offset_for_slice(buffer);
+    if offset == 0 {
+        16
+    } else {
+        offset
     }
 }
 
@@ -523,8 +551,9 @@ impl InterlacingInfo {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 struct BufferedScanlineInfo {
+    data: Vec<u8>,
     y: u32,
     lod: LevelOfDetail,
 }

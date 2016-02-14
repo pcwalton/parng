@@ -26,11 +26,15 @@ pub struct PredictionRequest {
     pub height: u32,
     pub color_depth: u8,
     pub indexed_color: bool,
+    pub scanlines: Vec<ScanlineToPredict>,
+}
+
+pub struct ScanlineToPredict {
     pub predictor: Predictor,
-    pub scanline_data: Vec<u8>,
-    pub scanline_offset: usize,
-    pub scanline_lod: LevelOfDetail,
-    pub scanline_y: u32,
+    pub data: Vec<u8>,
+    pub offset: usize,
+    pub lod: LevelOfDetail,
+    pub y: u32,
 }
 
 pub enum PredictorThreadToMainThreadMsg {
@@ -74,11 +78,7 @@ fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
                     height,
                     color_depth,
                     indexed_color,
-                    predictor,
-                    scanline_data: src,
-                    scanline_offset,
-                    scanline_lod,
-                    scanline_y
+                    scanlines,
             }) => {
                 let data_provider = match data_provider {
                     None => {
@@ -90,60 +90,69 @@ fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
 
                 let dest_width_in_bytes = width as usize * 4;
 
-                let prev_scanline_y = if scanline_y == 0 {
-                    None
-                } else {
-                    Some(scanline_y - 1)
-                };
-                let ScanlineData {
-                    reference_scanline: mut prev,
-                    current_scanline: dest,
-                    stride,
-                } = data_provider.get_scanline_data(prev_scanline_y, scanline_y, scanline_lod);
-                let mut properly_aligned = true;
-                let prev = match prev {
-                    Some(ref mut prev) => {
-                        if !slice_is_properly_aligned(prev) {
-                            properly_aligned = false;
+                for ScanlineToPredict {
+                    predictor,
+                    data: src,
+                    offset: scanline_offset,
+                    lod: scanline_lod,
+                    y: scanline_y
+                } in scanlines {
+                    let prev_scanline_y = if scanline_y == 0 {
+                        None
+                    } else {
+                        Some(scanline_y - 1)
+                    };
+                    let ScanlineData {
+                        reference_scanline: mut prev,
+                        current_scanline: dest,
+                        stride,
+                    } = data_provider.get_scanline_data(prev_scanline_y, scanline_y, scanline_lod);
+                    let mut properly_aligned = true;
+                    let prev = match prev {
+                        Some(ref mut prev) => {
+                            if !slice_is_properly_aligned(prev) {
+                                properly_aligned = false;
+                            }
+                            &mut prev[..]
                         }
-                        &mut prev[..]
+                        None => {
+                            blank.extend(iter::repeat(0).take(dest_width_in_bytes as usize));
+                            &mut blank[..]
+                        }
+                    };
+                    if !slice_is_properly_aligned(dest) {
+                        properly_aligned = false;
                     }
-                    None => {
-                        blank.extend(iter::repeat(0).take(dest_width_in_bytes as usize));
-                        &mut blank[..]
+
+                    if properly_aligned {
+                        predictor.accelerated_predict(&mut dest[..],
+                                                      &src[scanline_offset..],
+                                                      &prev[..],
+                                                      width,
+                                                      color_depth,
+                                                      stride)
+                    } else {
+                        predictor.predict(&mut dest[0..dest_width_in_bytes],
+                                          &src[scanline_offset..],
+                                          &prev[0..dest_width_in_bytes],
+                                          width,
+                                          color_depth,
+                                          stride);
                     }
-                };
-                if !slice_is_properly_aligned(dest) {
-                    properly_aligned = false;
-                }
 
-                if properly_aligned {
-                    predictor.accelerated_predict(&mut dest[..],
-                                                  &src[scanline_offset..],
-                                                  &prev[..],
-                                                  width,
-                                                  color_depth,
-                                                  stride)
-                } else {
-                    predictor.predict(&mut dest[0..dest_width_in_bytes],
-                                      &src[scanline_offset..],
-                                      &prev[0..dest_width_in_bytes],
-                                      width,
-                                      color_depth,
-                                      stride);
-                }
-
-                if indexed_color {
-                    let palette = palette.as_ref().expect("Indexed color but no palette?!");
-                    convert_indexed_to_rgba(&mut prev[0..dest_width_in_bytes], &palette[..]);
-                    if scanline_y == height - 1 {
-                        convert_indexed_to_rgba(&mut dest[0..dest_width_in_bytes], &palette[..])
+                    if indexed_color {
+                        let palette = palette.as_ref().expect("Indexed color but no palette?!");
+                        convert_indexed_to_rgba(&mut prev[0..dest_width_in_bytes], &palette[..]);
+                        if scanline_y == height - 1 {
+                            convert_indexed_to_rgba(&mut dest[0..dest_width_in_bytes],
+                                                    &palette[..])
+                        }
                     }
-                }
 
-                sender.send(PredictorThreadToMainThreadMsg::ScanlineComplete(scanline_y,
-                                                                             scanline_lod,
-                                                                             src)).unwrap()
+                    sender.send(PredictorThreadToMainThreadMsg::ScanlineComplete(scanline_y,
+                                                                                 scanline_lod,
+                                                                                 src)).unwrap()
+                }
             }
             MainThreadToPredictorThreadMsg::SetDataProvider(new_data_provider) => {
                 data_provider = Some(new_data_provider)

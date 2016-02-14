@@ -15,6 +15,7 @@ use std::mem;
 use std::sync::mpsc::{self, Receiver, Sender};
 
 const OUTPUT_BPP: u32 = 4;
+const RUNS: u32 = 16;
 
 struct SlurpingDataProvider {
     data: Vec<u8>,
@@ -116,16 +117,29 @@ fn main() {
     let in_path = matches.value_of("INPUT").unwrap();
     let out_path = matches.value_of("OUTPUT").unwrap();
 
-    let before = time::precise_time_ns();
+    let mut total_elapsed_time = 0;
+    let mut dimensions = None;
+    let mut pixels = None;
+    for _ in 0..RUNS {
+        let before = time::precise_time_ns();
+        let mut input = File::open(in_path).unwrap();
+        let mut image = Image::new().unwrap();
+        while let AddDataResult::Continue = image.add_data(&mut input).unwrap() {}
+        dimensions = Some(image.metadata().as_ref().unwrap().dimensions);
+        pixels = Some(decode(&mut image,
+                             &mut input,
+                             dimensions.unwrap().width,
+                             dimensions.unwrap().height));
+        let elapsed = time::precise_time_ns() - before;
+        total_elapsed_time += elapsed;
+        println!("Elapsed time: {}ms", elapsed as f32 / 1_000_000.0);
+    }
 
-    let mut input = File::open(in_path).unwrap();
-    let mut image = Image::new().unwrap();
-    while let AddDataResult::Continue = image.add_data(&mut input).unwrap() {}
+    total_elapsed_time /= RUNS as u64;
+    println!("Mean elapsed time: {}ms", total_elapsed_time as f32 / 1_000_000.0);
 
-    let dimensions = image.metadata().as_ref().unwrap().dimensions;
-
-    let pixels = decode(&mut image, &mut input, dimensions.width, dimensions.height);
-    println!("Elapsed time: {}ms", (time::precise_time_ns() - before) as f32 / 1_000_000.0);
+    let dimensions = dimensions.unwrap();
+    let pixels = pixels.unwrap();
 
     let mut output = BufWriter::new(File::create(out_path).unwrap());
     output.write_all(&[0, 0, 2, 0,

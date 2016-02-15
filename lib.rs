@@ -83,6 +83,10 @@ impl Image {
     pub fn add_data<R>(&mut self, reader: &mut R) -> Result<AddDataResult,PngError>
                        where R: Read + Seek {
         loop {
+            while let Ok(msg) = self.predictor_thread_comm.receiver.try_recv() {
+                try!(self.handle_predictor_thread_msg(msg));
+            }
+
             match self.decode_state {
                 DecodeState::Start => {
                     let initial_pos =
@@ -100,7 +104,8 @@ impl Image {
                                 DecodeState::LookingForImageData
                             };
 
-                            self.metadata = Some(metadata)
+                            self.metadata = Some(metadata);
+                            return Ok(AddDataResult::Continue)
                         }
                         Err(PngError::NeedMoreData) => {
                             try!(reader.seek(SeekFrom::Start(initial_pos)).map_err(PngError::Io));
@@ -182,9 +187,12 @@ impl Image {
                     let bytes_per_pixel = (color_depth / 8) as u32;
                     let stride = width * bytes_per_pixel * bytes_per_pixel /
                         InterlacingInfo::new(0, color_depth, self.current_lod).stride as u32;
+
+                    // Wait for the predictor thread to catch up if necessary.
                     let scanlines_to_buffer = self.scanlines_to_buffer();
-                    if self.scanline_data_buffer_info.len() >= scanlines_to_buffer as usize {
-                        return Ok(AddDataResult::BufferFull)
+                    while self.scanline_data_buffer_info.len() >= scanlines_to_buffer as usize {
+                        let msg = self.predictor_thread_comm.receiver.recv().unwrap();
+                        try!(self.handle_predictor_thread_msg(msg));
                     }
 
                     let bytes_read;
@@ -266,6 +274,8 @@ impl Image {
                                 *current_lod += 1
                             }
                         }
+
+                        try!(self.send_scanlines_to_predictor_thread_if_necessary());
                     }
 
                     let bytes_left_in_chunk_after_read = bytes_left_in_chunk - bytes_read as u32;
@@ -293,7 +303,7 @@ impl Image {
     }
 
     #[inline(never)]
-    pub fn decode(&mut self) -> Result<(),PngError> {
+    fn send_scanlines_to_predictor_thread_if_necessary(&mut self) -> Result<(),PngError> {
         let (dimensions, color_depth, color_type) = match self.metadata {
             None => return Err(PngError::NoMetadata),
             Some(ref metadata) => (metadata.dimensions, metadata.color_depth, metadata.color_type),
@@ -318,7 +328,7 @@ impl Image {
                     offset: scanline_buffer_offset,
                     lod: scanline_info.lod,
                     y: scanline_info.y,
-                })
+                });
             }
 
             self.predictor_thread_comm
@@ -326,10 +336,6 @@ impl Image {
                 .send(MainThreadToPredictorThreadMsg::Predict(request))
                 .unwrap();
             self.predictor_thread_comm.scanlines_in_progress += buffered_scanline_count;
-        }
-
-        while let Ok(msg) = self.predictor_thread_comm.receiver.try_recv() {
-            try!(self.handle_predictor_thread_msg(msg));
         }
 
         Ok(())
@@ -433,7 +439,6 @@ impl PngError {
 #[derive(Copy, Clone, PartialEq)]
 pub enum AddDataResult {
     Continue,
-    BufferFull,
     Finished,
 }
 

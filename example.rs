@@ -94,16 +94,7 @@ fn decode(image: &mut Image, input: &mut File, width: u32, height: u32) -> Vec<u
     let (data_provider, data_receiver) = SlurpingDataProvider::new(width, height);
     image.set_data_provider(Box::new(data_provider));
 
-    loop {
-        match image.add_data(input).unwrap() {
-            AddDataResult::Continue => {}
-            AddDataResult::BufferFull => image.decode().unwrap(),
-            AddDataResult::Finished => {
-                image.decode().unwrap();
-                break
-            }
-        }
-    }
+    while let AddDataResult::Continue = image.add_data(input).unwrap() {}
     image.wait_until_finished().unwrap();
     image.extract_data();
     get_data_from_receiver(data_receiver)
@@ -124,7 +115,16 @@ fn main() {
         let before = time::precise_time_ns();
         let mut input = File::open(in_path).unwrap();
         let mut image = Image::new().unwrap();
-        while let AddDataResult::Continue = image.add_data(&mut input).unwrap() {}
+        loop {
+            match image.add_data(&mut input).unwrap() {
+                AddDataResult::Continue => {
+                    if image.metadata().is_some() {
+                        break
+                    }
+                }
+                AddDataResult::Finished => panic!("Image ended before metadata was read!"),
+            }
+        }
         dimensions = Some(image.metadata().as_ref().unwrap().dimensions);
         pixels = Some(decode(&mut image,
                              &mut input,
@@ -132,7 +132,6 @@ fn main() {
                              dimensions.unwrap().height));
         let elapsed = time::precise_time_ns() - before;
         total_elapsed_time += elapsed;
-        println!("Elapsed time: {}ms", elapsed as f32 / 1_000_000.0);
     }
 
     total_elapsed_time /= RUNS as u64;

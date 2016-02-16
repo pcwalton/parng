@@ -7,8 +7,8 @@ extern crate time;
 
 use byteorder::{LittleEndian, WriteBytesExt};
 use clap::{App, Arg};
-use parng::{AddDataResult, DataProvider, Image, InterlacingInfo, LevelOfDetail, ScanlineData};
-use parng::{UninitializedExtension};
+use parng::{AddDataResult, DataProvider, ImageLoader, InterlacingInfo, LevelOfDetail};
+use parng::{ScanlineData, UninitializedExtension};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::mem;
@@ -90,7 +90,7 @@ fn get_data_from_receiver(data_receiver: Receiver<Vec<u8>>) -> Vec<u8> {
 }
 
 #[inline(never)]
-fn decode(image: &mut Image, input: &mut File, width: u32, height: u32) -> Vec<u8> {
+fn decode(image: &mut ImageLoader, input: &mut File, width: u32, height: u32) -> Vec<u8> {
     let (data_provider, data_receiver) = SlurpingDataProvider::new(width, height);
     image.set_data_provider(Box::new(data_provider));
 
@@ -114,7 +114,7 @@ fn main() {
     for _ in 0..RUNS {
         let before = time::precise_time_ns();
         let mut input = File::open(in_path).unwrap();
-        let mut image = Image::new().unwrap();
+        let mut image = ImageLoader::new().unwrap();
         loop {
             match image.add_data(&mut input).unwrap() {
                 AddDataResult::Continue => {

@@ -21,10 +21,11 @@ use std::mem;
 const BUFFER_SIZE: usize = 16384;
 const PIXELS_PER_PREDICTION_CHUNK: u32 = 1024;
 
+pub mod capi;
 pub mod metadata;
 mod prediction;
 
-pub struct Image {
+pub struct ImageLoader {
     metadata: Option<Metadata>,
     z_stream: z_stream,
     compressed_data_buffer: Vec<u8>,
@@ -45,7 +46,7 @@ pub struct Image {
     predictor_thread_comm: MainThreadToPredictorThreadComm,
 }
 
-impl Drop for Image {
+impl Drop for ImageLoader {
     fn drop(&mut self) {
         unsafe {
             drop(libz_sys::deflateEnd(&mut self.z_stream))
@@ -53,14 +54,14 @@ impl Drop for Image {
     }
 }
 
-impl Image {
-    pub fn new() -> Result<Image,PngError> {
+impl ImageLoader {
+    pub fn new() -> Result<ImageLoader,PngError> {
         let mut z_stream;
         unsafe {
             z_stream = mem::zeroed();
             try!(PngError::from_zlib_result(inflateInit(&mut z_stream)))
         }
-        Ok(Image {
+        Ok(ImageLoader {
             metadata: None,
             z_stream: z_stream,
             compressed_data_buffer: vec![],
@@ -293,7 +294,7 @@ impl Image {
         }
     }
 
-    pub fn advance_compressed_data_offset(&mut self) {
+    fn advance_compressed_data_offset(&mut self) {
         self.compressed_data_consumed = self.compressed_data_buffer.len() -
             self.z_stream.avail_in as usize;
         if self.compressed_data_consumed == self.compressed_data_buffer.len() {
@@ -419,11 +420,10 @@ pub enum PngError {
     InvalidMetadata(String),
     InvalidOperation(&'static str),
     InvalidData(String),
-    EntropyDecodingError(c_int),
     InvalidScanlinePredictor(u8),
+    EntropyDecodingError(c_int),
     NoMetadata,
     NoDataProvider,
-    AlignmentError,
 }
 
 impl PngError {
@@ -438,8 +438,8 @@ impl PngError {
 
 #[derive(Copy, Clone, PartialEq)]
 pub enum AddDataResult {
-    Continue,
     Finished,
+    Continue,
 }
 
 #[derive(Copy, Clone, PartialEq)]

@@ -6,12 +6,8 @@
 
 #![allow(non_camel_case_types)]
 
-use AddDataResult;
-use DataProvider;
-use ImageLoader;
-use LevelOfDetail;
 use PngError;
-use ScanlineData;
+use imageloader::{AddDataResult, DataProvider, ImageLoader, LevelOfDetail, ScanlineData};
 use libc::{c_void, size_t};
 use metadata::{ColorType, InterlaceMethod, Metadata};
 use std::io::{self, Error, ErrorKind, Read, Seek, SeekFrom};
@@ -249,7 +245,7 @@ pub unsafe extern "C" fn parng_image_loader_extract_data(image_loader: parng_ima
 pub unsafe extern "C" fn parng_image_loader_get_metadata(image_loader: parng_image_loader,
                                                          metadata_result: *mut parng_metadata)
                                                          -> u32 {
-    match (*image_loader).metadata {
+    match *(*image_loader).metadata() {
         None => 0,
         Some(ref metadata) => {
             *metadata_result = metadata_to_c_metadata(metadata);

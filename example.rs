@@ -7,8 +7,8 @@ extern crate time;
 
 use byteorder::{LittleEndian, WriteBytesExt};
 use clap::{App, Arg};
-use parng::{AddDataResult, DataProvider, ImageLoader, InterlacingInfo, LevelOfDetail};
-use parng::{ScanlineData, UninitializedExtension};
+use parng::imageloader::{self, AddDataResult, DataProvider, ImageLoader, InterlacingInfo};
+use parng::imageloader::{LevelOfDetail, ScanlineData, UninitializedExtension};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::mem;
@@ -26,13 +26,19 @@ struct SlurpingDataProvider {
 impl SlurpingDataProvider {
     #[inline(never)]
     pub fn new(width: u32, height: u32) -> (SlurpingDataProvider, Receiver<Vec<u8>>) {
-        let aligned_stride = parng::align(width as usize * 4);
+        let aligned_stride = imageloader::align(width as usize * 4);
         let (data_sender, data_receiver) = mpsc::channel();
         let length = aligned_stride * (height as usize);
         let mut data = vec![];
         unsafe {
             data.extend_with_uninitialized(length)
         }
+
+        // FIXME(pcwalton): Remove!
+        for p in data.iter_mut() {
+            *p = 0;
+        }
+
         let data_provider = SlurpingDataProvider {
             data: data,
             aligned_stride: aligned_stride,
@@ -148,7 +154,7 @@ fn main() {
     output.write_u16::<LittleEndian>(dimensions.height as u16).unwrap();
     output.write_all(&[24, 0]).unwrap();
 
-    let aligned_stride = parng::align(dimensions.width as usize * 4);
+    let aligned_stride = imageloader::align(dimensions.width as usize * 4);
     for y in 0..dimensions.height {
         let y = dimensions.height - y - 1;
         for x in 0..dimensions.width {

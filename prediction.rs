@@ -2,10 +2,8 @@
 //
 // Copyright (c) 2016 Mozilla Foundation
 
-use DataProvider;
-use LevelOfDetail;
 use PngError;
-use ScanlineData;
+use imageloader::{DataProvider, LevelOfDetail, ScanlineData};
 use std::iter;
 use std::mem;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -88,10 +86,14 @@ fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
                     Some(ref mut data_provider) => data_provider,
                 };
 
+                if !indexed_color {
+                    palette = None
+                }
+
                 let dest_width_in_bytes = width as usize * 4;
 
                 for ScanlineToPredict {
-                    predictor,
+                    mut predictor,
                     data: src,
                     offset: scanline_offset,
                     lod: scanline_lod,
@@ -124,6 +126,10 @@ fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
                         properly_aligned = false;
                     }
 
+                    if scanline_y == 0 {
+                        predictor = Predictor::None
+                    }
+
                     if properly_aligned {
                         predictor.accelerated_predict(&mut dest[..],
                                                       &src[scanline_offset..],
@@ -135,18 +141,13 @@ fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
                         predictor.predict(&mut dest[0..dest_width_in_bytes],
                                           &src[scanline_offset..],
                                           &prev[0..dest_width_in_bytes],
-                                          width,
                                           color_depth,
                                           stride);
                     }
 
-                    if indexed_color {
-                        let palette = palette.as_ref().expect("Indexed color but no palette?!");
-                        convert_indexed_to_rgba(&mut prev[0..dest_width_in_bytes], &palette[..]);
-                        if scanline_y == height - 1 {
-                            convert_indexed_to_rgba(&mut dest[0..dest_width_in_bytes],
-                                                    &palette[..])
-                        }
+                    convert_to_rgba(&mut prev[0..dest_width_in_bytes], &palette, color_depth);
+                    if scanline_y == height - 1 {
+                        convert_to_rgba(&mut dest[0..dest_width_in_bytes], &palette, color_depth);
                     }
 
                     sender.send(PredictorThreadToMainThreadMsg::ScanlineComplete(scanline_y,
@@ -196,17 +197,13 @@ impl Predictor {
         }
     }
 
-    fn predict(self,
-               dest: &mut [u8],
-               src: &[u8],
-               prev: &[u8],
-               _: u32,
-               color_depth: u8,
-               stride: u8) {
+    fn predict(self, dest: &mut [u8], src: &[u8], prev: &[u8], color_depth: u8, stride: u8) {
         let color_depth = (color_depth / 8) as usize;
         let mut a: [u8; 4] = [0; 4];
         let mut c: [u8; 4] = [0; 4];
         let stride = stride as usize;
+
+        // We use iterators here to avoid bounds checks, as this is performance-critical code.
         match self {
             Predictor::None => {
                 for (dest, src) in dest.chunks_mut(stride).zip(src.chunks(color_depth)) {
@@ -290,32 +287,40 @@ impl Predictor {
         debug_assert!(((dest.as_ptr() as usize) & 0xf) == 0);
         debug_assert!(((src.as_ptr() as usize) & 0xf) == 0);
         debug_assert!(((prev.as_ptr() as usize) & 0xf) == 0);
-        debug_assert!(color_depth == 32 || color_depth == 24 || color_depth == 8);
+        debug_assert!([8, 16, 24, 32].contains(&color_depth));
 
         let accelerated_implementation = match (self, color_depth, stride) {
             (Predictor::None, 32, 4) => Some(parng_predict_scanline_none_packed_32bpp),
             (Predictor::None, 32, _) => Some(parng_predict_scanline_none_strided_32bpp),
             (Predictor::None, 24, 4) => Some(parng_predict_scanline_none_packed_24bpp),
             (Predictor::None, 24, _) => Some(parng_predict_scanline_none_strided_24bpp),
+            (Predictor::None, 16, 4) => Some(parng_predict_scanline_none_packed_16bpp),
+            (Predictor::None, 16, _) => None,
             (Predictor::None, 8, 4) => Some(parng_predict_scanline_none_packed_8bpp),
             (Predictor::None, 8, _) => None,
             (Predictor::Left, 32, 4) => Some(parng_predict_scanline_left_packed_32bpp),
             (Predictor::Left, 32, _) => Some(parng_predict_scanline_left_strided_32bpp),
             (Predictor::Left, 24, 4) => Some(parng_predict_scanline_left_packed_24bpp),
             (Predictor::Left, 24, _) => Some(parng_predict_scanline_left_strided_24bpp),
+            (Predictor::Left, 16, 4) => Some(parng_predict_scanline_left_packed_16bpp),
+            (Predictor::Left, 16, _) => None,
             (Predictor::Left, 8, 4) => Some(parng_predict_scanline_left_packed_8bpp),
             (Predictor::Left, 8, _) => None,
             (Predictor::Up, 32, 4) => Some(parng_predict_scanline_up_packed_32bpp),
             (Predictor::Up, 32, _) => Some(parng_predict_scanline_up_strided_32bpp),
             (Predictor::Up, 24, 4) => Some(parng_predict_scanline_up_packed_24bpp),
             (Predictor::Up, 24, _) => Some(parng_predict_scanline_up_strided_24bpp),
+            (Predictor::Up, 16, 4) => Some(parng_predict_scanline_up_packed_16bpp),
+            (Predictor::Up, 16, _) => None,
             (Predictor::Up, 8, 4) => Some(parng_predict_scanline_up_packed_8bpp),
             (Predictor::Up, 8, _) => None,
             (Predictor::Average, 32, _) => Some(parng_predict_scanline_average_strided_32bpp),
             (Predictor::Average, 24, _) => Some(parng_predict_scanline_average_strided_24bpp),
+            (Predictor::Average, 16, _) => None,
             (Predictor::Average, 8, _) => None,
             (Predictor::Paeth, 32, _) => Some(parng_predict_scanline_paeth_strided_32bpp),
             (Predictor::Paeth, 24, _) => Some(parng_predict_scanline_paeth_strided_24bpp),
+            (Predictor::Paeth, 16, _) => None,
             (Predictor::Paeth, 8, _) => None,
             _ => panic!("Unsupported predictor/color depth combination!"),
         };
@@ -329,8 +334,22 @@ impl Predictor {
                                                stride as u64)
                 }
             }
-            None => self.predict(dest, src, prev, width, color_depth, stride),
+            None => self.predict(dest, src, prev, color_depth, stride),
         }
+    }
+}
+
+fn convert_to_rgba(scanline: &mut [u8], palette: &Option<Vec<u8>>, color_depth: u8) {
+    // TODO(pcwalton): Support 1bpp, 2bpp, and 4bpp indexed color.
+    if let Some(ref palette) = *palette {
+        return convert_indexed_to_rgba(scanline, &palette[..])
+    }
+
+    // TODO(pcwalton): Support 1bpp, 2bpp, and 4bpp grayscale.
+    match color_depth {
+        16 => convert_grayscale_alpha_to_rgba(scanline),
+        8 => convert_8bpp_grayscale_to_rgba(scanline),
+        _ => panic!("convert_to_rgba: Unsupported color depth!"),
     }
 }
 
@@ -343,6 +362,26 @@ fn convert_indexed_to_rgba(scanline: &mut [u8], palette: &[u8]) {
     }
 }
 
+/// TODO(pcwalton): Use SIMD for this. Greyscale images are pretty rare, so I haven't prioritized
+/// greyscale SIMDification, but it would be nice.
+fn convert_grayscale_alpha_to_rgba(scanline: &mut [u8]) {
+    for color in scanline.chunks_mut(4) {
+        let (y, a) = (color[0], color[1]);
+        color[1] = y;
+        color[2] = y;
+        color[3] = a
+    }
+}
+
+fn convert_8bpp_grayscale_to_rgba(scanline: &mut [u8]) {
+    for color in scanline.chunks_mut(4) {
+        let y = color[0];
+        color[1] = y;
+        color[2] = y;
+        color[3] = y
+    }
+}
+
 fn slice_is_properly_aligned(buffer: &[u8]) -> bool {
     address_is_properly_aligned(buffer.as_ptr() as usize) &&
         address_is_properly_aligned(buffer.len())
@@ -350,6 +389,11 @@ fn slice_is_properly_aligned(buffer: &[u8]) -> bool {
 
 fn address_is_properly_aligned(address: usize) -> bool {
     (address & 0xf) == 0
+}
+
+trait Format {
+    fn bytes_per_pixel() -> u8;
+    fn fixup(dest: &mut [u8], src: &[u8]);
 }
 
 #[link(name="parngacceleration")]
@@ -374,6 +418,11 @@ extern {
                                                  prev: *const u8,
                                                  length: u64,
                                                  stride: u64);
+    fn parng_predict_scanline_none_packed_16bpp(dest: *mut u8,
+                                                src: *const u8,
+                                                prev: *const u8,
+                                                length: u64,
+                                                stride: u64);
     fn parng_predict_scanline_none_packed_8bpp(dest: *mut u8,
                                                src: *const u8,
                                                prev: *const u8,
@@ -399,6 +448,11 @@ extern {
                                                  prev: *const u8,
                                                  length: u64,
                                                  stride: u64);
+    fn parng_predict_scanline_left_packed_16bpp(dest: *mut u8,
+                                                src: *const u8,
+                                                prev: *const u8,
+                                                length: u64,
+                                                stride: u64);
     fn parng_predict_scanline_left_packed_8bpp(dest: *mut u8,
                                                src: *const u8,
                                                prev: *const u8,
@@ -424,6 +478,11 @@ extern {
                                                prev: *const u8,
                                                length: u64,
                                                stride: u64);
+    fn parng_predict_scanline_up_packed_16bpp(dest: *mut u8,
+                                              src: *const u8,
+                                              prev: *const u8,
+                                              length: u64,
+                                              stride: u64);
     fn parng_predict_scanline_up_packed_8bpp(dest: *mut u8,
                                              src: *const u8,
                                              prev: *const u8,

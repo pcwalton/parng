@@ -7,11 +7,11 @@
 extern crate byteorder;
 extern crate libc;
 extern crate libz_sys;
-extern crate num;
 
 pub mod capi;
 pub mod imageloader;
 pub mod metadata;
+pub mod simple;
 mod prediction;
 
 use libc::c_int;

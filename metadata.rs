@@ -4,7 +4,6 @@
 
 use PngError;
 use byteorder::{self, BigEndian, ByteOrder, ReadBytesExt};
-use num::ToPrimitive;
 use std::io::Read;
 
 // 8 for the header; 12 for the chunk info (including CRC); 13 for the header.
@@ -20,15 +19,6 @@ pub struct Dimensions {
     pub width: u32,
     /// Image height in pixels.
     pub height: u32,
-}
-
-impl<T: ToPrimitive, U: ToPrimitive> From<(T, U)> for Dimensions {
-    fn from((w, h): (T, U)) -> Dimensions {
-        Dimensions {
-            width: w.to_u32().unwrap(),
-            height: h.to_u32().unwrap()
-        }
-    }
 }
 
 /// Color type used in an image.
@@ -215,7 +205,10 @@ impl Metadata {
         drop(try!(r.read_u32::<BigEndian>().map_byteorder_error("when reading metadata CRC")));
 
         Ok(Metadata {
-            dimensions: (width, height).into(),
+            dimensions: Dimensions {
+                width: width,
+                height: height,
+            },
             color_type: try!(
                 ColorType::from_u8(color_type).ok_or(
                     PngError::InvalidMetadata(format!("invalid color type: {}", color_type)))

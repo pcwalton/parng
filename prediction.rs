@@ -347,6 +347,7 @@ fn convert_to_rgba(scanline: &mut [u8], palette: &Option<Vec<u8>>, color_depth: 
 
     // TODO(pcwalton): Support 1bpp, 2bpp, and 4bpp grayscale.
     match color_depth {
+        32 | 24 => {}
         16 => convert_grayscale_alpha_to_rgba(scanline),
         8 => convert_8bpp_grayscale_to_rgba(scanline),
         _ => panic!("convert_to_rgba: Unsupported color depth!"),

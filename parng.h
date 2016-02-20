@@ -2,5 +2,129 @@
 //
 // Copyright (c) 2016 Mozilla Foundation
 
-// TODO(pcwalton)
+#ifndef PARNG_H
+#define PARNG_H
+
+#include <stdint.h>
+
+#define PARNG_ADD_DATA_RESULT_FINISHED          0
+#define PARNG_ADD_DATA_RESULT_CONTINUE          1
+
+#define PARNG_COLOR_TYPE_GRAYSCALE              0
+#define PARNG_COLOR_TYPE_RGB                    2
+#define PARNG_COLOR_TYPE_INDEXED                3
+#define PARNG_COLOR_TYPE_GRAYSCALE_ALPHA        4
+#define PARNG_COLOR_TYPE_RGB_ALPHA              5
+
+#define PARNG_COMPRESSION_METHOD_DEFLATE        0
+
+#define PARNG_SUCCESS                           0
+#define PARNG_ERROR_NEED_MORE_DATA              1
+#define PARNG_ERROR_IO                          2
+#define PARNG_ERROR_INVALID_METADATA            3
+#define PARNG_ERROR_INVALID_OPERATION           4
+#define PARNG_ERROR_INVALID_DATA                5
+#define PARNG_ERROR_INVALID_SCANLINE_PREDICTOR  6
+#define PARNG_ERROR_ENTROPY_DECODING_ERROR      7
+#define PARNG_ERROR_NO_METADATA                 8
+#define PARNG_ERROR_NO_DATA_PROVIDER            9
+
+#define PARNG_FILTER_METHOD_ADAPTIVE            0
+
+#define PARNG_INTERLACE_METHOD_NONE             0
+#define PARNG_INTERLACE_METHOD_ADAM7            1
+
+#define PARNG_LEVEL_OF_DETAIL_NONE              (-1)
+#define PARNG_LEVEL_OF_DETAIL_ADAM7_0           0
+#define PARNG_LEVEL_OF_DETAIL_ADAM7_1           1
+#define PARNG_LEVEL_OF_DETAIL_ADAM7_2           2
+#define PARNG_LEVEL_OF_DETAIL_ADAM7_3           3
+#define PARNG_LEVEL_OF_DETAIL_ADAM7_4           4
+#define PARNG_LEVEL_OF_DETAIL_ADAM7_5           5
+#define PARNG_LEVEL_OF_DETAIL_ADAM7_6           6
+
+#define PARNG_SEEK_FROM_START                   0
+#define PARNG_SEEK_FROM_CURRENT                 1
+#define PARNG_SEEK_FROM_END                     2
+
+typedef uint32_t parng_add_data_result;
+typedef uint32_t parng_color_type;
+typedef uint32_t parng_compression_method;
+typedef struct parng_data_provider parng_data_provider;
+typedef uint32_t parng_error;
+typedef uint32_t parng_filter_method;
+typedef struct parng_image_loader parng_image_loader;
+typedef uint32_t parng_interlace_method;
+typedef struct parng_interlacing_info parng_interlacing_info;
+typedef uint32_t parng_io_error;
+typedef uint32_t parng_level_of_detail;
+typedef struct parng_metadata parng_metadata;
+typedef struct parng_reader parng_reader;
+typedef struct parng_scanline_data parng_scanline_data;
+typedef uint32_t parng_seek_from;
+
+struct parng_reader {
+    parng_io_error (*read)(uint8_t *buffer,
+                           size_t buffer_length,
+                           size_t *bytes_read,
+                           void *user_data);
+    parng_io_error (*seek)(int64_t position,
+                           parng_seek_from from,
+                           uint64_t *new_position,
+                           void *user_data);
+    void *user_data;
+};
+
+struct parng_scanline_data {
+    uint8_t *reference_scanline;
+    size_t reference_scanline_length;
+    uint8_t *current_scanline;
+    size_t current_scanline_length;
+    uint8_t stride;
+};
+
+struct parng_data_provider {
+    void (*get_scanline_data)(int32_t reference_scanline,
+                              uint32_t current_scanline,
+                              parng_level_of_detail lod,
+                              parng_scanline_data *data,
+                              void *user_data);
+    void (*extract_data)(void *user_data);
+    void *user_data;
+};
+
+struct parng_metadata {
+    uint32_t width;
+    uint32_t height;
+    parng_color_type color_type;
+    parng_compression_method compression_method;
+    parng_filter_method filter_method;
+    parng_interlace_method interlace_method;
+};
+
+struct parng_interlacing_info {
+    uint32_t y;
+    uint8_t stride;
+    uint8_t offset;
+};
+
+parng_error parng_image_loader_create(parng_image_loader **image_loader);
+void parng_image_loader_destroy(parng_image_loader *image_loader);
+parng_error parng_image_loader_add_data(parng_image_loader *image_loader,
+                                        parng_reader *reader,
+                                        parng_add_data_result *result);
+parng_error parng_image_loader_wait_until_finished(parng_image_loader *image_loader);
+void parng_image_loader_set_data_provider(parng_image_loader *image_loader,
+                                          parng_data_provider *data_provider);
+void parng_image_loader_extract_data(parng_image_loader *image_loader);
+uint32_t parng_image_loader_get_metadata(parng_image_loader *image_loader,
+                                         parng_metadata *metadata_result);
+uintptr_t parng_image_loader_align(uintptr_t address);
+
+void parng_interlacing_info_init(parng_interlacing_info *interlacing_info,
+                                 uint32_t y,
+                                 uint8_t color_depth,
+                                 parng_level_of_detail lod);
+
+#endif
 

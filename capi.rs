@@ -7,8 +7,9 @@
 #![allow(non_camel_case_types)]
 
 use PngError;
-use imageloader::{AddDataResult, DataProvider, ImageLoader, LevelOfDetail, ScanlineData};
-use libc::{c_void, size_t};
+use imageloader::{self, AddDataResult, DataProvider, ImageLoader, InterlacingInfo, LevelOfDetail};
+use imageloader::{ScanlineData};
+use libc::{c_void, size_t, uintptr_t};
 use metadata::{ColorType, InterlaceMethod, Metadata};
 use std::io::{self, Error, ErrorKind, Read, Seek, SeekFrom};
 use std::mem;
@@ -20,7 +21,7 @@ pub type parng_color_type = u32;
 pub type parng_compression_method = u32;
 pub type parng_error = u32;
 pub type parng_filter_method = u32;
-pub type parng_image_loader = *mut ImageLoader;
+pub type parng_image_loader = ImageLoader;
 pub type parng_interlace_method = u32;
 pub type parng_io_error = u32;
 pub type parng_level_of_detail = i32;
@@ -53,8 +54,6 @@ pub const PARNG_FILTER_METHOD_ADAPTIVE: u32 = 0;
 pub const PARNG_INTERLACE_METHOD_NONE: u32 = 0;
 pub const PARNG_INTERLACE_METHOD_ADAM7: u32 = 1;
 
-pub const PARNG_IO_ERROR: u32 = 1;
-
 pub const PARNG_LEVEL_OF_DETAIL_NONE: i32 = -1;
 pub const PARNG_LEVEL_OF_DETAIL_ADAM7_0: i32 = 0;
 pub const PARNG_LEVEL_OF_DETAIL_ADAM7_1: i32 = 1;
@@ -77,7 +76,10 @@ pub struct parng_reader {
                                bytes_read: *mut size_t,
                                user_data: *mut c_void)
                                -> parng_io_error,
-    seek: unsafe extern "C" fn(position: i64, from: parng_seek_from, new_position: *mut u64)
+    seek: unsafe extern "C" fn(position: i64,
+                               from: parng_seek_from,
+                               new_position: *mut u64,
+                               user_data: *mut c_void)
                                -> parng_io_error,
     user_data: *mut c_void,
 }
@@ -88,10 +90,10 @@ impl Read for parng_reader {
             let mut bytes_read = 0;
             match (self.read)(buffer.as_mut_ptr(), buffer.len(), &mut bytes_read, self.user_data) {
                 PARNG_SUCCESS => Ok(bytes_read),
-                PARNG_IO_ERROR => Err(Error::new(ErrorKind::Other, "`parng` reader error")),
+                PARNG_ERROR_IO => Err(Error::new(ErrorKind::Other, "`parng` reader error")),
                 _ => {
                     panic!("`parng_reader::read()` must return either `PARNG_SUCCESS` or \
-                            `PARNG_IO_ERROR`!")
+                            `PARNG_ERROR_IO`!")
                 }
             }
         }
@@ -107,12 +109,12 @@ impl Seek for parng_reader {
                 SeekFrom::End(position) => (PARNG_SEEK_FROM_END, position),
             };
             let mut new_position = 0;
-            match (self.seek)(position, seek_from, &mut new_position) {
+            match (self.seek)(position, seek_from, &mut new_position, self.user_data) {
                 PARNG_SUCCESS => Ok(new_position),
-                PARNG_IO_ERROR => Err(Error::new(ErrorKind::Other, "`parng` reader error")),
+                PARNG_ERROR_IO => Err(Error::new(ErrorKind::Other, "`parng` reader error")),
                 _ => {
                     panic!("`parng_reader::seek()` must return either `PARNG_SUCCESS` or \
-                            `PARNG_IO_ERROR`!")
+                            `PARNG_ERROR_IO`!")
                 }
             }
         }
@@ -187,8 +189,15 @@ pub struct parng_metadata {
     pub interlace_method: parng_interlace_method,
 }
 
+#[repr(C)]
+pub struct parng_interlacing_info {
+    pub y: u32,
+    pub stride: u8,
+    pub offset: u8,
+}
+
 #[no_mangle]
-pub unsafe extern "C" fn parng_image_loader_create(image_loader: *mut parng_image_loader)
+pub unsafe extern "C" fn parng_image_loader_create(image_loader: *mut *mut parng_image_loader)
                                                    -> parng_error {
     match ImageLoader::new() {
         Ok(new_image_loader) => {
@@ -201,12 +210,12 @@ pub unsafe extern "C" fn parng_image_loader_create(image_loader: *mut parng_imag
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn parng_image_loader_destroy(image_loader: parng_image_loader) {
-    drop(mem::transmute::<parng_image_loader, Box<ImageLoader>>(image_loader))
+pub unsafe extern "C" fn parng_image_loader_destroy(image_loader: *mut parng_image_loader) {
+    drop(mem::transmute::<*mut parng_image_loader, Box<ImageLoader>>(image_loader))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn parng_image_loader_add_data(image_loader: parng_image_loader,
+pub unsafe extern "C" fn parng_image_loader_add_data(image_loader: *mut parng_image_loader,
                                                      reader: *mut parng_reader,
                                                      result: *mut parng_add_data_result)
                                                      -> parng_error {
@@ -220,8 +229,9 @@ pub unsafe extern "C" fn parng_image_loader_add_data(image_loader: parng_image_l
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn parng_image_loader_wait_until_finished(image_loader: parng_image_loader)
-                                                                -> parng_error {
+pub unsafe extern "C" fn parng_image_loader_wait_until_finished(
+        image_loader: *mut parng_image_loader)
+        -> parng_error {
     match (*image_loader).wait_until_finished() {
         Ok(()) => PARNG_SUCCESS,
         Err(err) => png_error_to_c_error(err),
@@ -231,18 +241,18 @@ pub unsafe extern "C" fn parng_image_loader_wait_until_finished(image_loader: pa
 
 #[no_mangle]
 pub unsafe extern "C" fn parng_image_loader_set_data_provider(
-        image_loader: parng_image_loader,
+        image_loader: *mut parng_image_loader,
         data_provider: *mut parng_data_provider) {
     (*image_loader).set_data_provider(Box::new(*data_provider))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn parng_image_loader_extract_data(image_loader: parng_image_loader) {
+pub unsafe extern "C" fn parng_image_loader_extract_data(image_loader: *mut parng_image_loader) {
     (*image_loader).extract_data()
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn parng_image_loader_get_metadata(image_loader: parng_image_loader,
+pub unsafe extern "C" fn parng_image_loader_get_metadata(image_loader: *mut parng_image_loader,
                                                          metadata_result: *mut parng_metadata)
                                                          -> u32 {
     match *(*image_loader).metadata() {
@@ -252,6 +262,23 @@ pub unsafe extern "C" fn parng_image_loader_get_metadata(image_loader: parng_ima
             1
         }
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn parng_image_loader_align(address: uintptr_t) -> uintptr_t {
+    imageloader::align(address)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn parng_interlacing_info_init(
+        interlacing_info: *mut parng_interlacing_info,
+        y: u32,
+        color_depth: u8,
+        lod: parng_level_of_detail) {
+    let info = InterlacingInfo::new(y, color_depth, c_level_of_detail_to_level_of_detail(lod));
+    (*interlacing_info).y = info.y;
+    (*interlacing_info).stride = info.stride;
+    (*interlacing_info).offset = info.offset
 }
 
 fn png_error_to_c_error(err: PngError) -> parng_error {
@@ -279,6 +306,16 @@ fn level_of_detail_to_c_level_of_detail(lod: LevelOfDetail) -> parng_level_of_de
     match lod {
         LevelOfDetail::None => PARNG_LEVEL_OF_DETAIL_NONE,
         LevelOfDetail::Adam7(level) => PARNG_LEVEL_OF_DETAIL_ADAM7_0 + level as i32,
+    }
+}
+
+fn c_level_of_detail_to_level_of_detail(c_lod: parng_level_of_detail) -> LevelOfDetail {
+    match c_lod {
+        PARNG_LEVEL_OF_DETAIL_NONE => LevelOfDetail::None,
+        _ if c_lod >= PARNG_LEVEL_OF_DETAIL_ADAM7_0 && c_lod <= PARNG_LEVEL_OF_DETAIL_ADAM7_6 => {
+            LevelOfDetail::Adam7((c_lod - PARNG_LEVEL_OF_DETAIL_ADAM7_0) as u8)
+        }
+        _ => panic!("Not a valid level of detail!"),
     }
 }
 

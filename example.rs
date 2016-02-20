@@ -34,11 +34,6 @@ impl SlurpingDataProvider {
             data.extend_with_uninitialized(length)
         }
 
-        // FIXME(pcwalton): Remove!
-        for p in data.iter_mut() {
-            *p = 0;
-        }
-
         let data_provider = SlurpingDataProvider {
             data: data,
             aligned_stride: aligned_stride,

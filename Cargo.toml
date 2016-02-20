@@ -6,6 +6,7 @@ build = "build.rs"
 [lib]
 name = "parng"
 path = "lib.rs"
+crate-type = ["rlib", "dylib"]
 
 [dependencies]
 byteorder = "0.4"

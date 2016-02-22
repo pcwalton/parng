@@ -40,11 +40,23 @@ fn main() {
         let y = image.height - y - 1;
         for x in 0..image.width {
             let start = (image.stride * (y as usize)) + (x as usize) * (OUTPUT_BPP as usize);
-            output.write_all(&[
-                image.pixels[start + 2],
-                image.pixels[start + 1],
-                image.pixels[start + 0],
-            ]).unwrap();
+            let src_r = image.pixels[start + 0] as f32;
+            let src_g = image.pixels[start + 1] as f32;
+            let src_b = image.pixels[start + 2] as f32;
+            let src_a = (image.pixels[start + 3] as f32) / 255.0;
+
+            // Blend with a checkerboard pattern so transparency will be visible.
+            let dest = if (x % 32 < 16 && y % 32 < 16) || (x % 32 >= 16 && y % 32 >= 16) {
+                192.0
+            } else {
+                255.0
+            };
+            let (dest_r, dest_g, dest_b) = (dest, dest, dest);
+
+            let dest_r = (src_r * src_a + (1.0 - src_a) * dest_r) as u8;
+            let dest_g = (src_g * src_a + (1.0 - src_a) * dest_g) as u8;
+            let dest_b = (src_b * src_a + (1.0 - src_a) * dest_b) as u8;
+            output.write_all(&[dest_b, dest_g, dest_r]).unwrap();
         }
     }
 }

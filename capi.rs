@@ -8,7 +8,7 @@
 
 use PngError;
 use imageloader::{self, AddDataResult, DataProvider, ImageLoader, InterlacingInfo, LevelOfDetail};
-use imageloader::{ScanlineData};
+use imageloader::{ScanlinesForPrediction, ScanlinesForRgbaConversion};
 use libc::{c_void, size_t, uintptr_t};
 use metadata::{ColorType, InterlaceMethod, Metadata};
 use std::io::{self, Error, ErrorKind, Read, Seek, SeekFrom};
@@ -122,7 +122,7 @@ impl Seek for parng_reader {
 }
 
 #[repr(C)]
-pub struct parng_scanline_data {
+pub struct parng_scanlines_for_prediction {
     pub reference_scanline: *mut u8,
     pub reference_scanline_length: size_t,
     pub current_scanline: *mut u8,
@@ -138,7 +138,7 @@ pub struct parng_data_provider {
     get_scanline_data: extern "C" fn(reference_scanline: i32,
                                      current_scanline: u32,
                                      lod: parng_level_of_detail,
-                                     data: *mut parng_scanline_data,
+                                     data: *mut parng_scanlines_for_prediction,
                                      user_data: *mut c_void),
     extract_data: extern "C" fn(user_data: *mut c_void),
     user_data: *mut c_void,
@@ -147,13 +147,14 @@ pub struct parng_data_provider {
 unsafe impl Send for parng_data_provider {}
 
 impl DataProvider for parng_data_provider {
-    fn get_scanline_data<'a>(&'a mut self,
-                             reference_scanline: Option<u32>,
-                             current_scanline: u32,
-                             lod: LevelOfDetail)
-                             -> ScanlineData {
+    fn fetch_scanlines_for_prediction<'a>(&'a mut self,
+                                          reference_scanline: Option<u32>,
+                                          current_scanline: u32,
+                                          lod: LevelOfDetail,
+                                          indexed: bool)
+                                          -> ScanlinesForPrediction<'a> {
         unsafe {
-            let mut c_scanline_data = parng_scanline_data {
+            let mut c_scanlines_for_prediction = parng_scanlines_for_prediction {
                 reference_scanline: ptr::null_mut(),
                 reference_scanline_length: 0,
                 current_scanline: ptr::null_mut(),
@@ -168,10 +169,15 @@ impl DataProvider for parng_data_provider {
             (self.get_scanline_data)(c_reference_scanline,
                                      current_scanline,
                                      c_lod,
-                                     &mut c_scanline_data,
+                                     &mut c_scanlines_for_prediction,
                                      self.user_data);
-            c_scanline_data_to_scanline_data(&c_scanline_data)
+            c_scanlines_for_prediction_to_scanlines_for_prediction(&c_scanlines_for_prediction)
         }
+    }
+
+    fn fetch_scanlines_for_rgba_conversion<'a>(&'a mut self, scanline: u32, lod: LevelOfDetail)
+                                               -> ScanlinesForRgbaConversion<'a> {
+        panic!("TODO fetch_scanlines_for_rgba_conversion")
     }
 
     fn extract_data(&mut self) {
@@ -319,18 +325,21 @@ fn c_level_of_detail_to_level_of_detail(c_lod: parng_level_of_detail) -> LevelOf
     }
 }
 
-unsafe fn c_scanline_data_to_scanline_data(c_scanline_data: *const parng_scanline_data)
-                                           -> ScanlineData<'static> {
-    ScanlineData {
-        reference_scanline: if (*c_scanline_data).reference_scanline.is_null() {
+unsafe fn c_scanlines_for_prediction_to_scanlines_for_prediction(
+        c_scanlines_for_prediction: *const parng_scanlines_for_prediction)
+        -> ScanlinesForPrediction<'static> {
+    ScanlinesForPrediction {
+        reference_scanline: if (*c_scanlines_for_prediction).reference_scanline.is_null() {
             None
         } else {
-            Some(slice::from_raw_parts_mut((*c_scanline_data).reference_scanline,
-                                           (*c_scanline_data).reference_scanline_length))
+            Some(slice::from_raw_parts_mut(
+                    (*c_scanlines_for_prediction).reference_scanline,
+                    (*c_scanlines_for_prediction).reference_scanline_length))
         },
-        current_scanline: slice::from_raw_parts_mut((*c_scanline_data).current_scanline,
-                                                    (*c_scanline_data).current_scanline_length),
-        stride: (*c_scanline_data).stride,
+        current_scanline: slice::from_raw_parts_mut(
+                              (*c_scanlines_for_prediction).current_scanline,
+                              (*c_scanlines_for_prediction).current_scanline_length),
+        stride: (*c_scanlines_for_prediction).stride,
     }
 }
 

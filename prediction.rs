@@ -3,20 +3,31 @@
 // Copyright (c) 2016 Mozilla Foundation
 
 use PngError;
-use imageloader::{DataProvider, LevelOfDetail, ScanlineData};
+use imageloader::{DataProvider, LevelOfDetail, ScanlinesForPrediction, ScanlinesForRgbaConversion};
+use imageloader::{Transparency};
 use std::iter;
 use std::mem;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
+static NO_LEVELS_OF_DETAIL: [LevelOfDetail; 1] = [LevelOfDetail::None];
+static ADAM7_LEVELS_OF_DETAIL: [LevelOfDetail; 7] = [
+    LevelOfDetail::Adam7(0),
+    LevelOfDetail::Adam7(1),
+    LevelOfDetail::Adam7(2),
+    LevelOfDetail::Adam7(3),
+    LevelOfDetail::Adam7(4),
+    LevelOfDetail::Adam7(5),
+    LevelOfDetail::Adam7(6),
+];
+
 pub enum MainThreadToPredictorThreadMsg {
     /// Sets a new `DataProvider`.
     SetDataProvider(Box<DataProvider>),
-    /// Sets a new palette.
-    SetPalette(Vec<u8>),
     /// Tells the data provider to extract data.
     ExtractData,
     Predict(PredictionRequest),
+    PerformRgbaConversion(PerformRgbaConversionRequest),
 }
 
 pub struct PredictionRequest {
@@ -25,6 +36,15 @@ pub struct PredictionRequest {
     pub color_depth: u8,
     pub indexed_color: bool,
     pub scanlines: Vec<ScanlineToPredict>,
+}
+
+pub struct PerformRgbaConversionRequest {
+    pub rgb_palette: Vec<u8>,
+    pub transparency: Transparency,
+    pub width: u32,
+    pub height: u32,
+    pub color_depth: u8,
+    pub interlaced: bool,
 }
 
 pub struct ScanlineToPredict {
@@ -36,7 +56,8 @@ pub struct ScanlineToPredict {
 }
 
 pub enum PredictorThreadToMainThreadMsg {
-    ScanlineComplete(u32, LevelOfDetail, Vec<u8>),
+    ScanlinePredictionComplete(u32, LevelOfDetail, Vec<u8>),
+    RgbaConversionComplete,
     NoDataProviderError,
 }
 
@@ -104,11 +125,14 @@ fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
                     } else {
                         Some(scanline_y - 1)
                     };
-                    let ScanlineData {
+                    let ScanlinesForPrediction {
                         reference_scanline: mut prev,
                         current_scanline: dest,
                         stride,
-                    } = data_provider.get_scanline_data(prev_scanline_y, scanline_y, scanline_lod);
+                    } = data_provider.fetch_scanlines_for_prediction(prev_scanline_y,
+                                                                     scanline_y,
+                                                                     scanline_lod,
+                                                                     indexed_color);
                     let mut properly_aligned = true;
                     let prev = match prev {
                         Some(ref mut prev) => {
@@ -145,26 +169,68 @@ fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
                                           stride);
                     }
 
-                    convert_to_rgba(&mut prev[0..dest_width_in_bytes], &palette, color_depth);
-                    if scanline_y == height - 1 {
-                        convert_to_rgba(&mut dest[0..dest_width_in_bytes], &palette, color_depth);
+                    if !indexed_color {
+                        convert_grayscale_to_rgba(&mut prev[0..dest_width_in_bytes],
+                                                  &palette,
+                                                  color_depth);
+                        if scanline_y == height - 1 {
+                            convert_grayscale_to_rgba(&mut dest[0..dest_width_in_bytes],
+                                                      &palette,
+                                                      color_depth);
+                        }
                     }
 
-                    sender.send(PredictorThreadToMainThreadMsg::ScanlineComplete(scanline_y,
-                                                                                 scanline_lod,
-                                                                                 src)).unwrap()
+                    sender.send(PredictorThreadToMainThreadMsg::ScanlinePredictionComplete(
+                            scanline_y,
+                            scanline_lod,
+                            src)).unwrap()
                 }
             }
             MainThreadToPredictorThreadMsg::SetDataProvider(new_data_provider) => {
                 data_provider = Some(new_data_provider)
             }
-            MainThreadToPredictorThreadMsg::SetPalette(new_rgb_palette) => {
-                let mut new_rgba_palette = Vec::with_capacity(256 * 4);
-                for color in new_rgb_palette.chunks(3) {
-                    new_rgba_palette.extend_from_slice(&color[..]);
-                    new_rgba_palette.push(0xff);
+            MainThreadToPredictorThreadMsg::PerformRgbaConversion(PerformRgbaConversionRequest {
+                    rgb_palette,
+                    transparency,
+                    width,
+                    height,
+                    color_depth,
+                    interlaced
+            }) => {
+                let data_provider = match data_provider {
+                    None => {
+                        sender.send(PredictorThreadToMainThreadMsg::NoDataProviderError).unwrap();
+                        continue
+                    }
+                    Some(ref mut data_provider) => data_provider,
+                };
+                let levels_of_detail = if !interlaced {
+                    &NO_LEVELS_OF_DETAIL[..]
+                } else {
+                    &ADAM7_LEVELS_OF_DETAIL[..]
+                };
+
+                for lod in levels_of_detail {
+                    for scanline_y in 0..height {
+                        let ScanlinesForRgbaConversion {
+                            rgba_scanline: dest,
+                            indexed_scanline: src,
+                            rgba_stride: dest_stride,
+                            indexed_stride: src_stride,
+                        } = data_provider.fetch_scanlines_for_rgba_conversion(scanline_y, *lod);
+                        let dest_line_stride = (dest_stride as usize) * (width as usize);
+                        let src_line_stride = (src_stride as usize) * (width as usize);
+                        convert_indexed_to_rgba(&mut dest[0..dest_line_stride],
+                                                &src[0..src_line_stride],
+                                                &rgb_palette[..],
+                                                &transparency,
+                                                color_depth,
+                                                dest_stride,
+                                                src_stride);
+                    }
                 }
-                palette = Some(new_rgba_palette)
+
+                sender.send(PredictorThreadToMainThreadMsg::RgbaConversionComplete).unwrap();
             }
             MainThreadToPredictorThreadMsg::ExtractData => {
                 if let Some(ref mut data_provider) = mem::replace(&mut data_provider, None) {
@@ -339,12 +405,7 @@ impl Predictor {
     }
 }
 
-fn convert_to_rgba(scanline: &mut [u8], palette: &Option<Vec<u8>>, color_depth: u8) {
-    // TODO(pcwalton): Support 1bpp, 2bpp, and 4bpp indexed color.
-    if let Some(ref palette) = *palette {
-        return convert_indexed_to_rgba(scanline, &palette[..])
-    }
-
+fn convert_grayscale_to_rgba(scanline: &mut [u8], palette: &Option<Vec<u8>>, color_depth: u8) {
     // TODO(pcwalton): Support 1bpp, 2bpp, and 4bpp grayscale.
     match color_depth {
         32 | 24 => {}
@@ -356,15 +417,36 @@ fn convert_to_rgba(scanline: &mut [u8], palette: &Option<Vec<u8>>, color_depth: 
 
 /// TODO(pcwalton): Agner says latency is going down for `vpgatherdd`. I don't have a Skylake to
 /// test on, but maybe it's worth using that instruction on that model and later?
-fn convert_indexed_to_rgba(scanline: &mut [u8], palette: &[u8]) {
-    for color in scanline.chunks_mut(4) {
-        let start = 4 * (color[0] as usize);
-        color.clone_from_slice(&palette[start..(start + 4)])
+fn convert_indexed_to_rgba(dest: &mut [u8],
+                           src: &[u8],
+                           rgb_palette: &[u8],
+                           transparency: &Transparency,
+                           _: u8,
+                           dest_stride: u8,
+                           src_stride: u8) {
+    // TODO(pcwalton): Support 1bpp, 2bpp, and 4bpp indexed color.
+    for (dest, src) in dest.chunks_mut(dest_stride as usize).zip(src.chunks(src_stride as usize)) {
+        let start = 3 * (src[0] as usize);
+        dest[0..3].clone_from_slice(&rgb_palette[start..(start + 3)]);
+        dest[3] = match *transparency {
+            Transparency::None => 0xff,
+            Transparency::Indexed(ref palette) => {
+                let index = src[0] as usize;
+                if index < palette.len() {
+                    palette[index]
+                } else {
+                    0xff
+                }
+            }
+            Transparency::MagicColor(..) => {
+                panic!("Can't have magic color transparency in indexed color images!")
+            }
+        }
     }
 }
 
-/// TODO(pcwalton): Use SIMD for this. Greyscale images are pretty rare, so I haven't prioritized
-/// greyscale SIMDification, but it would be nice.
+/// TODO(pcwalton): Use SIMD for this. Greyscale images are pretty rare, so it's not a priority,
+/// but it would be nice.
 fn convert_grayscale_alpha_to_rgba(scanline: &mut [u8]) {
     for color in scanline.chunks_mut(4) {
         let (y, a) = (color[0], color[1]);
@@ -374,6 +456,7 @@ fn convert_grayscale_alpha_to_rgba(scanline: &mut [u8]) {
     }
 }
 
+/// TODO(pcwalton): Use SIMD for this too.
 fn convert_8bpp_grayscale_to_rgba(scanline: &mut [u8]) {
     for color in scanline.chunks_mut(4) {
         let y = color[0];
@@ -390,11 +473,6 @@ fn slice_is_properly_aligned(buffer: &[u8]) -> bool {
 
 fn address_is_properly_aligned(address: usize) -> bool {
     (address & 0xf) == 0
-}
-
-trait Format {
-    fn bytes_per_pixel() -> u8;
-    fn fixup(dest: &mut [u8], src: &[u8]);
 }
 
 #[link(name="parngacceleration")]

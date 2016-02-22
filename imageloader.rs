@@ -3,11 +3,13 @@
 // Copyright (c) 2016 Mozilla Foundation
 
 use PngError;
+use byteorder::{self, ReadBytesExt};
 use libc::c_int;
 use libz_sys::{self, Z_ERRNO, Z_NO_FLUSH, Z_OK, Z_STREAM_END, z_stream};
 use metadata::{ChunkHeader, ColorType, InterlaceMethod, Metadata};
 use prediction::{MainThreadToPredictorThreadComm, MainThreadToPredictorThreadMsg};
-use prediction::{PredictionRequest, Predictor, PredictorThreadToMainThreadMsg, ScanlineToPredict};
+use prediction::{PredictionRequest, PerformRgbaConversionRequest, Predictor};
+use prediction::{PredictorThreadToMainThreadMsg, ScanlineToPredict};
 use std::cmp;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::mem;
@@ -21,6 +23,7 @@ pub struct ImageLoader {
     compressed_data_buffer: Vec<u8>,
     compressed_data_consumed: usize,
     palette: Vec<u8>,
+    transparency: Transparency,
     scanline_data_buffer: Vec<u8>,
     scanline_data_buffer_size: usize,
     cached_scanline_data_buffers: Vec<Vec<u8>>,
@@ -32,7 +35,10 @@ pub struct ImageLoader {
     current_lod: LevelOfDetail,
     scanlines_decoded_in_this_lod: u32,
     last_decoded_lod: LevelOfDetail,
+    rgba_conversion_complete: bool,
+
     decode_state: DecodeState,
+
     predictor_thread_comm: MainThreadToPredictorThreadComm,
 }
 
@@ -57,6 +63,7 @@ impl ImageLoader {
             compressed_data_buffer: vec![],
             compressed_data_consumed: 0,
             palette: vec![],
+            transparency: Transparency::None,
             scanline_data_buffer: vec![],
             scanline_data_buffer_size: 0,
             scanline_data_buffer_info: vec![],
@@ -65,6 +72,7 @@ impl ImageLoader {
             current_lod: LevelOfDetail::None,
             scanlines_decoded_in_this_lod: 0,
             last_decoded_lod: LevelOfDetail::None,
+            rgba_conversion_complete: false,
             decode_state: DecodeState::Start,
             predictor_thread_comm: MainThreadToPredictorThreadComm::new(),
         })
@@ -135,10 +143,17 @@ impl ImageLoader {
                         Err(error) => return Err(error),
                         Ok(chunk_header) => chunk_header,
                     };
+
                     if &chunk_header.chunk_type == b"IDAT" {
                         self.decode_state = DecodeState::DecodingData(chunk_header.length);
                     } else if &chunk_header.chunk_type == b"IEND" {
+                        if !self.transparency.is_none() {
+                            self.send_scanlines_to_predictor_thread_to_convert_to_rgba()
+                        }
+
                         self.decode_state = DecodeState::Finished
+                    } else if &chunk_header.chunk_type == b"tRNS" {
+                        self.decode_state = DecodeState::ReadingTransparency(chunk_header.length)
                     } else {
                         // Skip over this chunk, adding 4 to move past the CRC.
                         try!(reader.seek(SeekFrom::Current((chunk_header.length as i64) + 4))
@@ -157,12 +172,6 @@ impl ImageLoader {
                         self.decode_state = DecodeState::ReadingPalette(bytes_left_in_chunk);
                         continue
                     }
-
-                    // Send the palette over to the predictor thread.
-                    self.predictor_thread_comm
-                        .sender
-                        .send(MainThreadToPredictorThreadMsg::SetPalette(self.palette.clone()))
-                        .unwrap();
 
                     // Move past the CRC.
                     try!(reader.seek(SeekFrom::Current(4)).map_err(PngError::Io));
@@ -262,11 +271,13 @@ impl ImageLoader {
                                 !self.finished_entropy_decoding() {
                             self.current_y = 0;
                             if let LevelOfDetail::Adam7(ref mut current_lod) = self.current_lod {
-                                *current_lod += 1
+                                if *current_lod < 6 {
+                                    *current_lod += 1
+                                }
                             }
                         }
 
-                        try!(self.send_scanlines_to_predictor_thread_if_necessary());
+                        try!(self.send_scanlines_to_predictor_thread_to_predict_if_necessary());
                     }
 
                     let bytes_left_in_chunk_after_read = bytes_left_in_chunk - bytes_read as u32;
@@ -278,6 +289,77 @@ impl ImageLoader {
                     } else {
                         DecodeState::DecodingData(bytes_left_in_chunk_after_read)
                     }
+                }
+                DecodeState::ReadingTransparency(mut bytes_left_in_chunk) => {
+                    let initial_pos =
+                        try!(reader.seek(SeekFrom::Current(0)).map_err(PngError::Io));
+                    match self.metadata
+                              .as_ref()
+                              .expect("No metadata before transparency info?!")
+                              .color_type {
+                        ColorType::Grayscale => {
+                            match reader.read_u8() {
+                                Ok(value) => {
+                                    self.transparency =
+                                        Transparency::MagicColor(value, value, value)
+                                }
+                                Err(byteorder::Error::UnexpectedEOF) => {
+                                    try!(reader.seek(SeekFrom::Start(initial_pos))
+                                               .map_err(PngError::Io));
+                                    return Ok(AddDataResult::Continue)
+                                }
+                                Err(byteorder::Error::Io(io_error)) => {
+                                    return Err(PngError::Io(io_error))
+                                }
+                            }
+                        }
+                        ColorType::Rgb => {
+                            let mut buffer = [0, 0, 0];
+                            match reader.read(&mut buffer[..]) {
+                                Ok(3) => {
+                                    self.transparency =
+                                        Transparency::MagicColor(buffer[0], buffer[1], buffer[2])
+                                }
+                                Ok(_) => {
+                                    try!(reader.seek(SeekFrom::Start(initial_pos))
+                                               .map_err(PngError::Io));
+                                    return Ok(AddDataResult::Continue)
+                                }
+                                Err(io_error) => return Err(PngError::Io(io_error)),
+                            }
+                        }
+                        ColorType::Indexed => {
+                            if let Transparency::None = self.transparency {
+                                self.transparency = Transparency::Indexed(vec![])
+                            }
+                            let mut transparency = match self.transparency {
+                                Transparency::Indexed(ref mut transparency) => transparency,
+                                _ => panic!("Indexed color but no indexed transparency?!"),
+                            };
+                            let original_transparency_size = transparency.len();
+                            transparency.resize(original_transparency_size +
+                                                bytes_left_in_chunk as usize, 0);
+                            let bytes_read =
+                                try!(reader.read(&mut transparency[original_transparency_size..])
+                                           .map_err(PngError::Io));
+                            bytes_left_in_chunk -= bytes_read as u32;
+                            transparency.truncate(original_transparency_size + bytes_read);
+                            if bytes_left_in_chunk > 0 {
+                                self.decode_state =
+                                    DecodeState::ReadingTransparency(bytes_left_in_chunk);
+                                continue
+                            }
+                        }
+                        ColorType::GrayscaleAlpha | ColorType::RgbAlpha => {
+                            panic!("Shouldn't be reading a `tRNS` chunk with an alpha color type!")
+                        }
+                    }
+
+                    // Move past the CRC.
+                    try!(reader.seek(SeekFrom::Current(4)).map_err(PngError::Io));
+
+                    // Keep looking for image data (although we should be done by now).
+                    self.decode_state = DecodeState::LookingForImageData
                 }
                 DecodeState::Finished => return Ok(AddDataResult::Finished),
             }
@@ -294,7 +376,8 @@ impl ImageLoader {
     }
 
     #[inline(never)]
-    fn send_scanlines_to_predictor_thread_if_necessary(&mut self) -> Result<(),PngError> {
+    fn send_scanlines_to_predictor_thread_to_predict_if_necessary(&mut self)
+                                                                  -> Result<(),PngError> {
         let (dimensions, color_depth, color_type) = match self.metadata {
             None => return Err(PngError::NoMetadata),
             Some(ref metadata) => (metadata.dimensions, metadata.color_depth, metadata.color_type),
@@ -332,11 +415,34 @@ impl ImageLoader {
         Ok(())
     }
 
+    #[inline(never)]
+    fn send_scanlines_to_predictor_thread_to_convert_to_rgba(&mut self) {
+        let rgb_palette = mem::replace(&mut self.palette, vec![]);
+        let transparency = mem::replace(&mut self.transparency, Transparency::None);
+        let (dimensions, color_depth, interlaced) = {
+            let metadata = self.metadata.as_ref().expect("No metadata?!");
+            (metadata.dimensions,
+             metadata.color_depth,
+             metadata.interlace_method != InterlaceMethod::Disabled)
+        };
+        self.predictor_thread_comm
+            .sender
+            .send(MainThreadToPredictorThreadMsg::PerformRgbaConversion(
+                PerformRgbaConversionRequest {
+                    rgb_palette: rgb_palette,
+                    transparency: transparency,
+                    width: dimensions.width,
+                    height: dimensions.height,
+                    color_depth: color_depth,
+                    interlaced: interlaced,
+                })).unwrap();
+    }
+
     fn handle_predictor_thread_msg(&mut self, msg: PredictorThreadToMainThreadMsg)
                                    -> Result<(),PngError> {
         match msg {
             PredictorThreadToMainThreadMsg::NoDataProviderError => Err(PngError::NoDataProvider),
-            PredictorThreadToMainThreadMsg::ScanlineComplete(y, lod, mut buffer) => {
+            PredictorThreadToMainThreadMsg::ScanlinePredictionComplete(y, lod, mut buffer) => {
                 buffer.clear();
                 self.cached_scanline_data_buffers.push(buffer);
                 if lod > self.last_decoded_lod {
@@ -347,6 +453,10 @@ impl ImageLoader {
                     debug_assert!(self.last_decoded_lod == lod);
                     self.scanlines_decoded_in_this_lod = y + 1
                 }
+                Ok(())
+            }
+            PredictorThreadToMainThreadMsg::RgbaConversionComplete => {
+                self.rgba_conversion_complete = true;
                 Ok(())
             }
         }
@@ -371,9 +481,13 @@ impl ImageLoader {
     }
 
     fn finished_decoding_altogether(&self) -> bool {
-        let height = self.metadata.as_ref().expect("No metadata yet!").dimensions.height;
+        let (height, indexed) = {
+            let metadata = self.metadata.as_ref().expect("No metadata yet!");
+            (metadata.dimensions.height, metadata.color_type == ColorType::Indexed)
+        };
         (self.current_lod == LevelOfDetail::None || self.current_lod == LevelOfDetail::Adam7(6)) &&
-            self.scanlines_decoded_in_this_lod >= height
+            self.scanlines_decoded_in_this_lod >= height / 2 &&
+            (!indexed || self.rgba_conversion_complete)
     }
 
     #[inline(never)]
@@ -426,10 +540,11 @@ pub enum AddDataResult {
 #[derive(Copy, Clone, PartialEq)]
 enum DecodeState {
     Start,
-    LookingForImageData,
     LookingForPalette,
     ReadingPalette(u32),
+    LookingForImageData,
     DecodingData(u32),
+    ReadingTransparency(u32),
     Finished,
 }
 
@@ -460,18 +575,28 @@ unsafe fn inflateInit(strm: *mut z_stream) -> c_int {
 
 pub trait DataProvider : Send {
     /// `reference_scanline`, if present, will always be above `current_scanline`.
-    fn get_scanline_data<'a>(&'a mut self,
-                             reference_scanline: Option<u32>,
-                             current_scanline: u32,
-                             lod: LevelOfDetail)
-                             -> ScanlineData;
+    fn fetch_scanlines_for_prediction<'a>(&'a mut self,
+                                          reference_scanline: Option<u32>,
+                                          current_scanline: u32,
+                                          lod: LevelOfDetail,
+                                          indexed: bool)
+                                          -> ScanlinesForPrediction<'a>;
+    fn fetch_scanlines_for_rgba_conversion<'a>(&'a mut self, scanline: u32, lod: LevelOfDetail)
+                                               -> ScanlinesForRgbaConversion<'a>;
     fn extract_data(&mut self);
 }
 
-pub struct ScanlineData<'a> {
+pub struct ScanlinesForPrediction<'a> {
     pub reference_scanline: Option<&'a mut [u8]>,
     pub current_scanline: &'a mut [u8],
     pub stride: u8,
+}
+
+pub struct ScanlinesForRgbaConversion<'a> {
+    pub rgba_scanline: &'a mut [u8],
+    pub indexed_scanline: &'a [u8],
+    pub rgba_stride: u8,
+    pub indexed_stride: u8,
 }
 
 pub trait UninitializedExtension {
@@ -549,3 +674,20 @@ pub enum LevelOfDetail {
     None,
     Adam7(u8),
 }
+
+#[derive(Debug)]
+pub enum Transparency {
+    None,
+    Indexed(Vec<u8>),
+    MagicColor(u8, u8, u8),
+}
+
+impl Transparency {
+    fn is_none(&self) -> bool {
+        match *self {
+            Transparency::None => true,
+            _ => false,
+        }
+    }
+}
+

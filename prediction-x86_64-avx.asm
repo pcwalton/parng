@@ -48,58 +48,99 @@ global parng_predict_scanline_paeth_strided_24bpp
 
 section .text
 
+; Helper functions to factor out the unsafe memory accesses in one place follow.
+
+%macro loop_start 0
+    prolog
+    xor %[rax],%[rax]
+.loop:
+%endmacro
+
+%macro loop_end 2
+%if %1 > 16
+%error "Destination/previous stride may not be greater than 16"
+%endif
+%if %2 > 16
+%error "Source may not be greater than 16"
+%endif
+    add rax,%1
+    add src,%2
+    cmp rax,length
+    jb .loop
+%endmacro
+
+%macro loop_end_stride 1
+%if %1 > 16
+%error "Source may not be greater than 16"
+%endif
+    add rax,stride
+    add src,%1
+    cmp rax,length
+    jb .loop
+%endmacro
+
+%macro epilog 0
+    ret
+%endmacro
+
+%xdefine src src
+%xdefine dest dest+rax
+%xdefine prev prev+rax
+
+; #begin-safe-code
+
 ; load_8bpp_to_32bpp_shuffle_mask(r128 dest)
 ;
-; Register clobbers: rax
+; Register clobbers: r11
 %macro load_8bpp_to_32bpp_shuffle_mask 1
-    mov rax,0x0101010100000000
-    movq %1,rax
-    mov rax,0x0303030302020202
-    pinsrq %1,rax,1                             ; dest = 8bpp → 32bpp shuffle mask
+    mov r11,0x0101010100000000
+    movq %1,r11
+    mov r11,0x0303030302020202
+    pinsrq %1,r11,1                            ; dest = 8bpp → 32bpp shuffle mask
 %endmacro
 
 ; load_16bpp_to_32bpp_shuffle_mask(r128 dest)
 ;
-; Register clobbers: rax
+; Register clobbers: r11
 %macro load_16bpp_to_32bpp_shuffle_mask 1
-    mov rax,0x8080030280800100
-    movq %1,rax
-    mov rax,0x8080070680800504
-    pinsrq %1,rax,1                             ; dest = 16bpp → 32bpp shuffle mask
+    mov r11,0x8080030280800100
+    movq %1,r11
+    mov r11,0x8080070680800504
+    pinsrq %1,r11,1                             ; dest = 16bpp → 32bpp shuffle mask
 %endmacro
 
 ; load_24bpp_to_32bpp_shuffle_mask(r128 dest)
 ;
-; Register clobbers: rax
+; Register clobbers: r11
 %macro load_24bpp_to_32bpp_shuffle_mask 1
-    mov rax,0x8005040380020100
-    movq %1,rax
-    mov rax,0x800b0a0980080706
-    pinsrq %1,rax,1                             ; dest = 24bpp → 32bpp shuffle mask
+    mov r11,0x8005040380020100
+    movq %1,r11
+    mov r11,0x800b0a0980080706
+    pinsrq %1,r11,1                             ; dest = 24bpp → 32bpp shuffle mask
 %endmacro
 
 ; load_64bpp_to_32bpp_shuffle_mask(r128 dest)
 ;
-; Register clobbers: rax
+; Register clobbers: r11
 %macro load_64bpp_to_32bpp_shuffle_mask 1
-    mov rax,0x8080808006040200  ; rax = 64bpp → 32bpp shuffle mask
-    movq %1,rax                 ; dest = 64bpp → 32bpp shuffle mask
+    mov r11,0x8080808006040200  ; r11 = 64bpp → 32bpp shuffle mask
+    movq %1,r11                 ; dest = 64bpp → 32bpp shuffle mask
 %endmacro
 
 ; load_64bpp_to_32bpp_opaque_alpha_shuffle_mask(r128 dest)
 ;
-; Register clobbers: rax
+; Register clobbers: r11
 %macro load_64bpp_to_32bpp_opaque_alpha_shuffle_mask 1
-    mov rax,0x8080808080040200  ; rax = 64bpp → 32bpp opaque alpha shuffle mask
-    movq %1,rax                 ; dest = 64bpp → 32bpp opaque alpha shuffle mask
+    mov r11,0x8080808080040200  ; r11 = 64bpp → 32bpp opaque alpha shuffle mask
+    movq %1,r11                 ; dest = 64bpp → 32bpp opaque alpha shuffle mask
 %endmacro
 
 ; load_32bpp_opaque_alpha_mask(r128 dest)
 ;
-; Register clobbers: rax
+; Register clobbers: r11
 %macro load_32bpp_opaque_alpha_mask 1
-    mov rax,0xff000000ff000000
-    movq %1,rax
+    mov r11,0xff000000ff000000
+    movq %1,r11
     movddup %1,%1               ; dest = [ ff000000 x 4 ]
 %endmacro
 
@@ -113,15 +154,11 @@ section .text
 ; factor out the loop into a macro for safety.
 parng_predict_scanline_none_packed_32bpp:
     prolog
-    xor rax,rax
-.loop:
+    loop_start
     movdqa xmm0,[src]
-    movdqa [dest+rax],xmm0
-    add rax,16
-    add src,16
-    cmp rax,length
-    jb .loop
-    ret
+    movdqa [dest],xmm0
+    loop_end 16,16
+    epilog
 
 ; parng_predict_scanline_none_strided_32bpp(uint8x4 *dest,
 ;                                           uint8x4 *src,
@@ -130,15 +167,11 @@ parng_predict_scanline_none_packed_32bpp:
 ;                                           uint64_t stride)
 parng_predict_scanline_none_strided_32bpp:
     prolog
-    xor rax,rax
-.loop:
+    loop_start
     mov r11,[src]
-    mov [dest+rax],r11
-    add rax,stride
-    add src,4
-    cmp rax,length
-    jb .loop
-    ret
+    mov [dest],r11
+    loop_end_stride 4
+    epilog
 
 ; parng_predict_scanline_none_packed_24bpp(uint8x4 *dest,
 ;                                          uint8x4 *src,
@@ -148,16 +181,12 @@ parng_predict_scanline_none_strided_32bpp:
 parng_predict_scanline_none_packed_24bpp:
     prolog
     load_24bpp_to_32bpp_shuffle_mask xmm1
-    xor rax,rax
-.loop:
+    loop_start
     movdqu xmm0,[src]
     pshufb xmm0,xmm1
-    movdqa [dest+rax],xmm0
-    add src,12
-    add rax,16
-    cmp rax,length
-    jb .loop
-    ret
+    movdqa [dest],xmm0
+    loop_end 16,12
+    epilog
 
 ; parng_predict_scanline_none_strided_24bpp(uint8x4 *dest,
 ;                                           uint8x4 *src,
@@ -166,16 +195,12 @@ parng_predict_scanline_none_packed_24bpp:
 ;                                           uint64_t stride)
 parng_predict_scanline_none_strided_24bpp:
     prolog
-    xor rax,rax
-.loop:
-    mov r10d,[src]
-    and r10d,0x00ffffff
-    mov [dest+rax],r10d
-    add src,4
-    add rax,stride
-    cmp rax,length
-    jb .loop
-    ret
+    loop_start
+    mov r11d,[src]
+    and r11d,0x00ffffff
+    mov [dest],r11d
+    loop_end_stride 4
+    epilog
 
 ; parng_predict_scanline_none_packed_16bpp(uint8x4 *dest,
 ;                                          uint8x4 *src,
@@ -185,16 +210,12 @@ parng_predict_scanline_none_strided_24bpp:
 parng_predict_scanline_none_packed_16bpp:
     prolog
     load_16bpp_to_32bpp_shuffle_mask xmm1
-    xor rax,rax
-.loop:
+    loop_start
     movd xmm0,[src]
     pshufb xmm0,xmm1
-    movdqa [dest+rax],xmm0
-    add src,8
-    add rax,16
-    cmp rax,length
-    jb .loop
-    ret
+    movdqa [dest],xmm0
+    loop_end 16,8
+    epilog
 
 ; parng_predict_scanline_none_packed_8bpp(uint8x4 *dest,
 ;                                         uint8x4 *src,
@@ -204,16 +225,12 @@ parng_predict_scanline_none_packed_16bpp:
 parng_predict_scanline_none_packed_8bpp:
     prolog
     load_8bpp_to_32bpp_shuffle_mask xmm1
-    xor rax,rax
-.loop:
+    loop_start
     movd xmm0,[src]
     pshufb xmm0,xmm1
-    movdqa [dest+rax],xmm0
-    add src,4
-    add rax,16
-    cmp rax,length
-    jb .loop
-    ret
+    movdqa [dest],xmm0
+    loop_end 16,4
+    epilog
 
 ; predict_pixels_left(r/m128 dest, r/m128 src)
 ;
@@ -243,14 +260,10 @@ parng_predict_scanline_none_packed_8bpp:
 parng_predict_scanline_left_packed_32bpp:
     prolog
     xorps xmm0,xmm0
-    xor rax,rax
-.loop:
-    predict_pixels_left [dest+rax],[src]    ; xmm0 = [ 0, 0, 0, a+b+c+d+z ]
-    add rax,16
-    add src,16
-    cmp rax,length
-    jb .loop
-    ret
+    loop_start
+    predict_pixels_left [dest],[src]        ; xmm0 = [ 0, 0, 0, a+b+c+d+z ]
+    loop_end 16,16
+    epilog
 
 ; parng_predict_scanline_left_strided_32bpp(uint8x4 *dest,
 ;                                           uint8x4 *src,
@@ -263,16 +276,12 @@ parng_predict_scanline_left_packed_32bpp:
 parng_predict_scanline_left_strided_32bpp:
     prolog
     xorps xmm0,xmm0
-    xor rax,rax
-.loop:
+    loop_start
     movd xmm1,[src]
     paddb xmm0,xmm1
-    movd [dest+rax],xmm0
-    add src,4
-    add rax,stride
-    cmp rax,length
-    jb .loop
-    ret
+    movd [dest],xmm0
+    loop_end_stride 4
+    epilog
 
 ; parng_predict_scanline_left_packed_24bpp(uint8x4 *dest,
 ;                                          uint8x3 *src,
@@ -284,18 +293,14 @@ parng_predict_scanline_left_packed_24bpp:
     load_24bpp_to_32bpp_shuffle_mask xmm2       ; xmm2 = 24bpp → 32bpp shuffle mask
     load_32bpp_opaque_alpha_mask xmm3           ; xmm3 = opaque alpha mask
     xorps xmm0,xmm0                             ; xmm0 = a = 0
-    xor rax,rax
-.loop:
+    loop_start
     movdqu xmm1,[src]                           ; xmm1 = src (24bpp)
     pshufb xmm1,xmm2                            ; xmm1 = [ d, c, b, a ]
     predict_pixels_left xmm1,xmm1               ; xmm1 = result; xmm0 = [ 0, 0, 0, a+b+c+d+z ]
     por xmm1,xmm3                               ; xmm1 = result with alpha == 0xff
-    movdqa [dest+rax],xmm1
-    add src,12
-    add rax,16
-    cmp rax,length
-    jb .loop
-    ret
+    movdqa [dest],xmm1
+    loop_end 16,12
+    epilog
 
 ; parng_predict_scanline_left_strided_24bpp(uint8x4 *dest,
 ;                                           uint8x3 *src,
@@ -307,17 +312,13 @@ parng_predict_scanline_left_strided_24bpp:
     load_24bpp_to_32bpp_shuffle_mask xmm2       ; xmm2 = 24bpp → 32bpp shuffle mask
     load_32bpp_opaque_alpha_mask xmm3           ; xmm3 = opaque alpha mask
     xorps xmm0,xmm0                             ; xmm0 = a = 0
-    xor rax,rax
-.loop:
+    loop_start
     movd xmm1,[src]                             ; xmm1 = src (24bpp)
     paddb xmm0,xmm1
     por xmm0,xmm3                               ; xmm1 = result with alpha == 0xff
-    movd [dest+rax],xmm0
-    add src,3
-    add rax,stride
-    cmp rax,length
-    jb .loop
-    ret
+    movd [dest],xmm0
+    loop_end_stride 3
+    epilog
 
 ; parng_predict_scanline_left_packed_16bpp(uint8x4 *dest,
 ;                                          uint8x3 *src,
@@ -328,17 +329,13 @@ parng_predict_scanline_left_packed_16bpp:
     prolog
     load_16bpp_to_32bpp_shuffle_mask xmm2       ; xmm2 = 16bpp → 32bpp shuffle mask
     xorps xmm0,xmm0                             ; xmm0 = a = 0
-    xor rax,rax
-.loop:
+    loop_start
     movq xmm1,[src]                             ; xmm1 = src (16bpp)
     pshufb xmm1,xmm2                            ; xmm1 = [ d, c, b, a ]
     predict_pixels_left xmm1,xmm1               ; xmm1 = result; xmm0 = [ 0, 0, 0, a+b+c+d+z ]
-    movdqa [dest+rax],xmm1
-    add src,8
-    add rax,16
-    cmp rax,length
-    jb .loop
-    ret
+    movdqa [dest],xmm1
+    loop_end 16,8
+    epilog
 
 ; parng_predict_scanline_left_packed_8bpp(uint8x4 *dest,
 ;                                         uint8x3 *src,
@@ -349,17 +346,13 @@ parng_predict_scanline_left_packed_8bpp:
     prolog
     load_8bpp_to_32bpp_shuffle_mask xmm2        ; xmm2 = 8bpp → 32bpp shuffle mask
     xorps xmm0,xmm0                             ; xmm0 = a = 0
-    xor rax,rax
-.loop:
+    loop_start
     movd xmm1,[src]                             ; xmm1 = src (8bpp)
     pshufb xmm1,xmm2                            ; xmm1 = [ d, c, b, a ]
     predict_pixels_left xmm1,xmm1               ; xmm1 = result; xmm0 = [ 0, 0, 0, a+b+c+d+z ]
-    movdqa [dest+rax],xmm1
-    add src,4
-    add rax,16
-    cmp rax,length
-    jb .loop
-    ret
+    movdqa [dest],xmm1
+    loop_end 16,4
+    epilog
 
 ; parng_predict_scanline_up_packed_32bpp(uint8x4 *dest,
 ;                                        uint8x4 *src,
@@ -368,16 +361,12 @@ parng_predict_scanline_left_packed_8bpp:
 ;                                        uint64_t stride)
 parng_predict_scanline_up_packed_32bpp:
     prolog
-    xor rax,rax
-.loop:
-    movdqa xmm0,[prev+rax]                      ; xmm0 = prev
+    loop_start
+    movdqa xmm0,[prev]                          ; xmm0 = prev
     paddb xmm0,[src]                            ; xmm0 = prev + this
-    movdqa [dest+rax],xmm0                      ; write result
-    add src,16
-    add rax,16
-    cmp rax,length
-    jb .loop
-    ret
+    movdqa [dest],xmm0                          ; write result
+    loop_end 16,16
+    epilog
 
 ; parng_predict_scanline_up_strided_32bpp(uint8x4 *dest,
 ;                                         uint8x4 *src,
@@ -386,17 +375,13 @@ parng_predict_scanline_up_packed_32bpp:
 ;                                         uint64_t stride)
 parng_predict_scanline_up_strided_32bpp:
     prolog
-    xor rax,rax
-.loop:
-    movd xmm0,[prev+rax]                        ; xmm0 = prev
+    loop_start
+    movd xmm0,[prev]                            ; xmm0 = prev
     movd xmm1,[src]                             ; xmm1 = this
     paddb xmm0,xmm1                             ; xmm0 = prev + this
-    movd [dest+rax],xmm0                        ; write result
-    add src,4
-    add rax,stride
-    cmp rax,length
-    jb .loop
-    ret
+    movd [dest],xmm0                            ; write result
+    loop_end_stride 4
+    epilog
 
 ; parng_predict_scanline_up_packed_24bpp(uint8x4 *dest,
 ;                                        uint8x3 *src,
@@ -408,18 +393,14 @@ parng_predict_scanline_up_strided_32bpp:
 parng_predict_scanline_up_packed_24bpp:
     prolog
     load_24bpp_to_32bpp_shuffle_mask xmm2       ; xmm2 = 24bpp → 32bpp shuffle mask
-    xor rax,rax
-.loop:
-    movdqa xmm0,[prev+rax]                      ; xmm0 = prev
+    loop_start
+    movdqa xmm0,[prev]                          ; xmm0 = prev
     movdqu xmm1,[src]                           ; xmm1 = src (24bpp)
     pshufb xmm1,xmm2                            ; xmm1 = src (32bpp)
     paddb xmm0,xmm1                             ; xmm0 = prev + this
-    movdqa [dest+rax],xmm0                      ; write result
-    add src,12
-    add rax,16
-    cmp rax,length
-    jb .loop
-    ret
+    movdqa [dest],xmm0                          ; write result
+    loop_end 16,12
+    epilog
 
 ; parng_predict_scanline_up_strided_24bpp(uint8x4 *dest,
 ;                                         uint8x3 *src,
@@ -431,18 +412,14 @@ parng_predict_scanline_up_packed_24bpp:
 parng_predict_scanline_up_strided_24bpp:
     prolog
     load_24bpp_to_32bpp_shuffle_mask xmm2       ; xmm2 = 24bpp → 32bpp shuffle mask
-    xor rax,rax
-.loop:
-    movd xmm0,[prev+rax]                        ; xmm0 = prev
+    loop_start
+    movd xmm0,[prev]                            ; xmm0 = prev
     movd xmm1,[src]                             ; xmm1 = src
     paddb xmm0,xmm1                             ; xmm1 = prev + src (24bpp)
     pshufb xmm0,xmm2                            ; xmm1 = prev + src (32bpp)
-    movd [dest+rax],xmm0                        ; write result
-    add src,3
-    add rax,stride
-    cmp rax,length
-    jb .loop
-    ret
+    movd [dest],xmm0                            ; write result
+    loop_end_stride 3
+    epilog
 
 ; parng_predict_scanline_up_packed_16bpp(uint8x4 *dest,
 ;                                        uint8 *src,
@@ -452,18 +429,14 @@ parng_predict_scanline_up_strided_24bpp:
 parng_predict_scanline_up_packed_16bpp:
     prolog
     load_16bpp_to_32bpp_shuffle_mask xmm2       ; xmm2 = 16bpp → 32bpp shuffle mask
-    xor rax,rax
-.loop:
-    movdqa xmm0,[prev+rax]                      ; xmm0 = prev
+    loop_start
+    movdqa xmm0,[prev]                          ; xmm0 = prev
     movdqu xmm1,[src]                           ; xmm1 = src (16bpp)
     pshufb xmm1,xmm2                            ; xmm1 = src (32bpp)
     paddb xmm0,xmm1                             ; xmm0 = prev + this
-    movdqa [dest+rax],xmm0                      ; write result
-    add src,8
-    add rax,16
-    cmp rax,length
-    jb .loop
-    ret
+    movdqa [dest],xmm0                          ; write result
+    loop_end 16,8
+    epilog
 
 ; parng_predict_scanline_up_packed_8bpp(uint8x4 *dest,
 ;                                       uint8 *src,
@@ -473,18 +446,14 @@ parng_predict_scanline_up_packed_16bpp:
 parng_predict_scanline_up_packed_8bpp:
     prolog
     load_8bpp_to_32bpp_shuffle_mask xmm2        ; xmm2 = 8bpp → 32bpp shuffle mask
-    xor rax,rax
-.loop:
-    movdqa xmm0,[prev+rax]                      ; xmm0 = prev
+    loop_start
+    movdqa xmm0,[prev]                          ; xmm0 = prev
     movdqu xmm1,[src]                           ; xmm1 = src (24bpp)
     pshufb xmm1,xmm2                            ; xmm1 = src (32bpp)
     paddb xmm0,xmm1                             ; xmm0 = prev + this
-    movdqa [dest+rax],xmm0                      ; write result
-    add src,12
-    add rax,16
-    cmp rax,length
-    jb .loop
-    ret
+    movdqa [dest],xmm0                          ; write result
+    loop_end 16,12
+    epilog
 
 ; predict_pixels_average(r/m32 dest, xmm/m32 src, xmm/m64 prev)
 ;
@@ -516,14 +485,10 @@ parng_predict_scanline_average_strided_32bpp:
     prolog
     load_64bpp_to_32bpp_shuffle_mask xmm3       ; rax = 64bpp → 32bpp shuffle mask
     xorps xmm0,xmm0                             ; xmm0 = a = 0
-    xor rax,rax
-.loop:
-    predict_pixels_average [dest+rax],[src],[prev+rax]  ; xmm0 = a (16-bit)
-    add src,4
-    add rax,stride
-    cmp rax,length
-    jb .loop
-    ret
+    loop_start
+    predict_pixels_average [dest],[src],[prev]  ; xmm0 = a (16-bit)
+    loop_end_stride 4
+    epilog
 
 ; parng_predict_scanline_average_strided_24bpp(uint8x4 *dest,
 ;                                              uint8x3 *src,
@@ -532,19 +497,15 @@ parng_predict_scanline_average_strided_32bpp:
 ;                                              uint64_t stride)
 parng_predict_scanline_average_strided_24bpp:
     prolog
-    mov rax,0x8080808080040200                  ; rax = 64bpp → 32bpp shuffle mask (no alpha!)
-    movq xmm3,rax                               ; xmm3 = 64bpp → 32bpp shuffle mask (no alpha!)
+    mov r11,0x8080808080040200                   ; r11 = 64bpp → 32bpp shuffle mask (no alpha!)
+    movq xmm3,r11                                ; xmm3 = 64bpp → 32bpp shuffle mask (no alpha!)
     xorps xmm0,xmm0                             ; xmm0 = a = 0
-    xor rax,rax
-.loop:
-    predict_pixels_average r9d,[src],[prev+rax] ; r9 = a (16-bit)
-    or r9d,0xff000000
-    mov [dest+rax],r9d
-    add src,3
-    add rax,stride
-    cmp rax,length
-    jb .loop
-    ret
+    loop_start
+    predict_pixels_average r11d,[src],[prev]     ; r11 = a (16-bit)
+    or r11d,0xff000000
+    mov [dest],r11d
+    loop_end_stride 3
+    epilog
 
 ; predict_pixels_paeth(r/m32 dest, xmm/m64 src, xmm/m64 prev)
 ;
@@ -601,14 +562,10 @@ parng_predict_scanline_paeth_strided_32bpp:
     load_64bpp_to_32bpp_shuffle_mask xmm10  ; xmm10 = 64bpp → 32bpp shuffle mask
     xorps xmm0,xmm0             ; xmm0 = a = 0
     xorps xmm2,xmm2             ; xmm2 = c = 0
-    xor rax,rax
-.loop:
-    predict_pixels_paeth [dest+rax],[src],[prev+rax]
-    add src,4
-    add rax,stride
-    cmp rax,length
-    jb .loop
-    ret
+    loop_start
+    predict_pixels_paeth [dest],[src],[prev]
+    loop_end_stride 4
+    epilog
 
 ; parng_predict_scanline_paeth_strided_24bpp(uint8x4 *dest,
 ;                                            uint8x3 *src,
@@ -620,14 +577,10 @@ parng_predict_scanline_paeth_strided_24bpp:
     load_64bpp_to_32bpp_opaque_alpha_shuffle_mask xmm10 ; xmm10 = 64bpp → 32bpp shuffle mask
     xorps xmm0,xmm0             ; xmm0 = a = 0
     xorps xmm2,xmm2             ; xmm2 = c = 0
-    xor rax,rax
-.loop:
-    predict_pixels_paeth r9d,[src],[prev+rax]
-    or r9d,0xff000000
-    mov [dest+rax],r9d
-    add src,3
-    add rax,stride
-    cmp rax,length
-    jb .loop
-    ret
+    loop_start
+    predict_pixels_paeth r11d,[src],[prev]
+    or r11d,0xff000000
+    mov [dest],r11d
+    loop_end_stride 3
+    epilog
 

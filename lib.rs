@@ -8,14 +8,17 @@ extern crate byteorder;
 extern crate libc;
 extern crate libz_sys;
 
+use libc::c_int;
+use std::io;
+
 pub mod capi;
 pub mod imageloader;
 pub mod metadata;
 pub mod simple;
 mod prediction;
 
-use libc::c_int;
-use std::io;
+#[cfg(test)]
+pub mod test;
 
 #[derive(Debug)]
 pub enum PngError {

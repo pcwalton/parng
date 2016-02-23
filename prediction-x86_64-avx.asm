@@ -472,7 +472,7 @@ parng_predict_scanline_up_packed_8bpp:
     psrlw xmm0,1                                ; xmm0 = avg(a, b) (16-bit)
     pshufb xmm0,xmm3                            ; xmm0 = avg(a, b) (8-bit)
     paddb xmm0,xmm2                             ; xmm0 = src + avg(a, b)
-    movd %1,xmm0                                ; write this
+    movd %1,xmm0                                ; write output pixel
     pmovzxbw xmm0,xmm0                          ; xmm0 = a (16-bit)
 %endmacro
 

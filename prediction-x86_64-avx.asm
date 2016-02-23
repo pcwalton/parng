@@ -149,9 +149,6 @@ section .text
 ;                                          uint8x4 *prev,
 ;                                          uint64_t length,
 ;                                          uint64_t stride)
-;
-; FIXME(pcwalton): We don't need two adds here, but I'm leaving them in in the chance that we can
-; factor out the loop into a macro for safety.
 parng_predict_scanline_none_packed_32bpp:
     prolog
     loop_start
@@ -211,7 +208,7 @@ parng_predict_scanline_none_packed_16bpp:
     prolog
     load_16bpp_to_32bpp_shuffle_mask xmm1
     loop_start
-    movd xmm0,[src]
+    movq xmm0,[src]
     pshufb xmm0,xmm1
     movdqa [dest],xmm0
     loop_end 16,8
@@ -243,8 +240,8 @@ parng_predict_scanline_none_packed_8bpp:
     paddb xmm0,%2                               ; xmm0 = [ d,         c,       b,     a+z       ]
     vpslldq xmm1,xmm0,8                         ; xmm1 = [ b,         a,       0,     0         ]
     paddb xmm0,xmm1                             ; xmm0 = [ b+d,       a+c+z,   b,     a+z       ]
-    vpslldq xmm1,xmm0,4                         ; xmm1 = [ a+c+z,     b,       a+e,   0         ]
-    paddb xmm0,xmm1                             ; xmm0 = [ a+b+c+d+z, a+b+c+z, a+b+e, a+z       ]
+    vpslldq xmm1,xmm0,4                         ; xmm1 = [ a+c+z,     b,       a+z,   0         ]
+    paddb xmm0,xmm1                             ; xmm0 = [ a+b+c+d+z, a+b+c+z, a+b+z, a+z       ]
     movdqa %1,xmm0                              ; write result
     vpsrldq xmm0,12                             ; xmm0 = [ 0,         0,       0,     a+b+c+d+z ]
 %endmacro
@@ -254,14 +251,11 @@ parng_predict_scanline_none_packed_8bpp:
 ;                                          uint8x4 *prev,
 ;                                          uint64_t length,
 ;                                          uint64_t stride)
-;
-; FIXME(pcwalton): We don't need two adds here, but I'm leaving them in in the chance that we can
-; factor out the loop into a macro for safety.
 parng_predict_scanline_left_packed_32bpp:
     prolog
     xorps xmm0,xmm0
     loop_start
-    predict_pixels_left [dest],[src]        ; xmm0 = [ 0, 0, 0, a+b+c+d+z ]
+    predict_pixels_left [dest],[src]
     loop_end 16,16
     epilog
 
@@ -270,9 +264,6 @@ parng_predict_scanline_left_packed_32bpp:
 ;                                           uint8x4 *prev,
 ;                                           uint64_t length,
 ;                                           uint64_t stride)
-;
-; FIXME(pcwalton): We don't need two adds here, but I'm leaving them in in the chance that we can
-; factor out the loop into a macro for safety.
 parng_predict_scanline_left_strided_32bpp:
     prolog
     xorps xmm0,xmm0

@@ -14,7 +14,6 @@ ALLOWED_INSTRUCTIONS = Set.new(%w(and mov movd movddup movdqa movdqu movq or pab
 ALLOWED_MEMORY_LOCATIONS = Set.new %w(dest prev src)
 ALLOWED_OPERANDS = Set.new(%w(r11 r11d xmm0 xmm1 xmm2 xmm3 xmm4 xmm5 xmm6 xmm7 xmm8 xmm9 xmm10) +
                            %w(xmm11 xmm12 xmm13 xmm14 xmm15))
-ALLOWED_PUNCTUATION = Set.new([',', '%'])
 CRITICAL_MACROS = [
     Set.new(%w(prolog)),
     Set.new(%w(loop_start)),
@@ -73,7 +72,7 @@ file.each_line do |line|
     until tokens.empty?
         token = tokens.shift
         next if ALLOWED_OPERANDS.include? token
-        next if ALLOWED_PUNCTUATION.include? token
+        next if token == ','
         next if token =~ /^0x[0-9a-fA-F]+$/
         next if token =~ /^\d+$/
         if token == '%'

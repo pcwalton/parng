@@ -295,7 +295,7 @@ fn png_error_to_c_error(err: PngError) -> parng_error {
         PngError::InvalidOperation(_) => PARNG_ERROR_INVALID_OPERATION,
         PngError::InvalidData(_) => PARNG_ERROR_INVALID_DATA,
         PngError::InvalidScanlinePredictor(_) => PARNG_ERROR_INVALID_SCANLINE_PREDICTOR,
-        PngError::EntropyDecodingError(_) => PARNG_ERROR_ENTROPY_DECODING_ERROR,
+        PngError::EntropyDecodingError => PARNG_ERROR_ENTROPY_DECODING_ERROR,
         PngError::NoMetadata => PARNG_ERROR_INVALID_METADATA,
         PngError::NoDataProvider => PARNG_ERROR_NO_DATA_PROVIDER,
     }

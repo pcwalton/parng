@@ -4,22 +4,22 @@
 
 use PngError;
 use byteorder::{self, ReadBytesExt};
+use flate2::{DataError, Decompress, Flush};
 use libc::c_int;
-use libz_sys::{self, Z_ERRNO, Z_NO_FLUSH, Z_OK, Z_STREAM_END, z_stream};
 use metadata::{ChunkHeader, ColorType, InterlaceMethod, Metadata};
 use prediction::{MainThreadToPredictorThreadComm, MainThreadToPredictorThreadMsg};
 use prediction::{PredictionRequest, PerformRgbaConversionRequest, Predictor};
 use prediction::{PredictorThreadToMainThreadMsg, ScanlineToPredict};
 use std::cmp;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::mem;
 
 const BUFFER_SIZE: usize = 16384;
 const PIXELS_PER_PREDICTION_CHUNK: u32 = 1024;
 
 pub struct ImageLoader {
+    entropy_decoder: Decompress,
     metadata: Option<Metadata>,
-    z_stream: z_stream,
     compressed_data_buffer: Vec<u8>,
     compressed_data_consumed: usize,
     palette: Vec<u8>,
@@ -42,24 +42,11 @@ pub struct ImageLoader {
     predictor_thread_comm: MainThreadToPredictorThreadComm,
 }
 
-impl Drop for ImageLoader {
-    fn drop(&mut self) {
-        unsafe {
-            drop(libz_sys::deflateEnd(&mut self.z_stream))
-        }
-    }
-}
-
 impl ImageLoader {
     pub fn new() -> Result<ImageLoader,PngError> {
-        let mut z_stream;
-        unsafe {
-            z_stream = mem::zeroed();
-            try!(PngError::from_zlib_result(inflateInit(&mut z_stream)))
-        }
         Ok(ImageLoader {
+            entropy_decoder: Decompress::new(true),
             metadata: None,
-            z_stream: z_stream,
             compressed_data_buffer: vec![],
             compressed_data_consumed: 0,
             palette: vec![],
@@ -211,40 +198,53 @@ impl ImageLoader {
                         bytes_read = 0
                     }
 
-                    unsafe {
-                        self.z_stream.avail_in = (self.compressed_data_buffer.len() -
-                                                  self.compressed_data_consumed) as u32;
-                        self.z_stream.next_in =
-                            &mut self.compressed_data_buffer[self.compressed_data_consumed];
+                    let avail_in = self.compressed_data_buffer.len() -
+                        self.compressed_data_consumed;
 
-                        // Read the scanline data.
-                        //
-                        // TODO(pcwalton): This may well show up in profiles. Probably we are going
-                        // to want to read multiple scanlines at once. Before we do this, though,
-                        // we are going to have to deal with SSE alignment restrictions.
-                        if self.z_stream.avail_in != 0 {
-                            // Make room for the stride + 32 bytes, which should be enough to
-                            // handle any amount of padding on both ends.
-                            self.scanline_data_buffer
-                                .extend_with_uninitialized(1 + (stride as usize) + 32);
-                            let offset =
-                                aligned_scanline_buffer_offset(&self.scanline_data_buffer[..]);
-                            let original_size = self.scanline_data_buffer_size;
-                            self.z_stream.avail_out = 1 + stride - (original_size as u32);
-                            self.z_stream.next_out =
-                                &mut self.scanline_data_buffer[offset + original_size - 1];
-                            debug_assert!(self.z_stream.avail_out as usize + original_size +
-                                          offset <= self.scanline_data_buffer.len());
-                            try!(PngError::from_zlib_result(libz_sys::inflate(
-                                    &mut self.z_stream,
-                                    Z_NO_FLUSH)));
-                            self.advance_compressed_data_offset();
-                            self.scanline_data_buffer_size =
-                                (1 + stride - self.z_stream.avail_out) as usize;
-                        } else {
-                            return Ok((AddDataResult::Continue))
-                        }
+                    // Read the scanline data.
+                    //
+                    // TODO(pcwalton): This may well show up in profiles. Probably we are going
+                    // to want to read multiple scanlines at once. Before we do this, though,
+                    // we are going to have to deal with SSE alignment restrictions.
+                    if avail_in == 0 {
+                        return Ok(AddDataResult::Continue)
                     }
+
+                    // Make room for the stride + 32 bytes, which should be enough to
+                    // handle any amount of padding on both ends.
+                    unsafe {
+                        self.scanline_data_buffer
+                            .extend_with_uninitialized(1 + (stride as usize) + 32);
+                    }
+
+                    let offset = aligned_scanline_buffer_offset(&self.scanline_data_buffer);
+                    let original_size = self.scanline_data_buffer_size;
+                    let start_in = self.compressed_data_consumed;
+                    let avail_out = 1 + (stride as usize) - original_size;
+                    let start_out = offset + original_size - 1;
+                    debug_assert!(avail_out as usize + original_size + offset <=
+                                  self.scanline_data_buffer.len());
+                    let before_decompression_in = self.entropy_decoder.total_in();
+                    let before_decompression_out = self.entropy_decoder.total_out();
+                    try!(self.entropy_decoder
+                             .decompress(&self.compressed_data_buffer[start_in..(start_in +
+                                                                                 avail_in)],
+                                         &mut self.scanline_data_buffer[start_out..(start_out +
+                                                                                    avail_out)],
+                                         Flush::None)
+                             .map_err(PngError::from));
+
+                    // Advance the compressed data offset.
+                    self.compressed_data_consumed = start_in +
+                        (self.entropy_decoder.total_in() - before_decompression_in) as usize;
+                    if self.compressed_data_consumed == self.compressed_data_buffer.len() {
+                        self.compressed_data_consumed = 0;
+                        self.compressed_data_buffer.truncate(0)
+                    }
+
+                    // Advance the decompressed data offset.
+                    self.scanline_data_buffer_size = original_size +
+                        (self.entropy_decoder.total_out() - before_decompression_out) as usize;
 
                     // Save the buffer and advance the Y position if necessary.
                     if self.scanline_data_buffer_size == 1 + stride as usize {
@@ -363,15 +363,6 @@ impl ImageLoader {
                 }
                 DecodeState::Finished => return Ok(AddDataResult::Finished),
             }
-        }
-    }
-
-    fn advance_compressed_data_offset(&mut self) {
-        self.compressed_data_consumed = self.compressed_data_buffer.len() -
-            self.z_stream.avail_in as usize;
-        if self.compressed_data_consumed == self.compressed_data_buffer.len() {
-            self.compressed_data_consumed = 0;
-            self.compressed_data_buffer.truncate(0)
         }
     }
 
@@ -517,18 +508,14 @@ impl ImageLoader {
     }
 }
 
-trait FromZlibResult : Sized {
-    fn from_zlib_result(error: c_int) -> Result<(), Self>;
+impl From<DataError> for PngError {
+    fn from(_: DataError) -> PngError {
+        PngError::EntropyDecodingError
+    }
 }
 
-impl FromZlibResult for PngError {
-    fn from_zlib_result(error: c_int) -> Result<(), PngError> {
-        match error {
-            Z_OK | Z_STREAM_END => Ok(()),
-            Z_ERRNO => Err(PngError::Io(io::Error::last_os_error())),
-            _ => Err(PngError::EntropyDecodingError(error)),
-        }
-    }
+trait FromFlateResult : Sized {
+    fn from_flate_result(error: c_int) -> Result<(), Self>;
 }
 
 #[derive(Copy, Clone, PartialEq)]
@@ -565,12 +552,6 @@ fn aligned_scanline_buffer_offset(buffer: &[u8]) -> usize {
     } else {
         offset
     }
-}
-
-#[allow(non_snake_case)]
-unsafe fn inflateInit(strm: *mut z_stream) -> c_int {
-    let version = libz_sys::zlibVersion();
-    libz_sys::inflateInit_(strm, version, mem::size_of::<z_stream>() as c_int)
 }
 
 pub trait DataProvider : Send {

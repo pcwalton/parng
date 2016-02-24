@@ -5,10 +5,9 @@
 //! A parallel PNG decoder.
 
 extern crate byteorder;
+extern crate flate2;
 extern crate libc;
-extern crate libz_sys;
 
-use libc::c_int;
 use std::io;
 
 pub mod capi;
@@ -28,7 +27,7 @@ pub enum PngError {
     InvalidOperation(&'static str),
     InvalidData(String),
     InvalidScanlinePredictor(u8),
-    EntropyDecodingError(c_int),
+    EntropyDecodingError,
     NoMetadata,
     NoDataProvider,
 }

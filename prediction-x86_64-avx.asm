@@ -305,6 +305,7 @@ parng_predict_scanline_left_strided_24bpp:
     xorps xmm0,xmm0                             ; xmm0 = a = 0
     loop_start
     movd xmm1,[src]                             ; xmm1 = src (24bpp)
+    pshufb xmm1,xmm2                            ; xmm1 = src (32bpp)
     paddb xmm0,xmm1
     por xmm0,xmm3                               ; xmm1 = result with alpha == 0xff
     movd [dest],xmm0
@@ -388,7 +389,7 @@ parng_predict_scanline_up_packed_24bpp:
     movdqa xmm0,[prev]                          ; xmm0 = prev
     movdqu xmm1,[src]                           ; xmm1 = src (24bpp)
     pshufb xmm1,xmm2                            ; xmm1 = src (32bpp)
-    paddb xmm0,xmm1                             ; xmm0 = prev + this
+    paddb xmm0,xmm1                             ; xmm0 = prev + src
     movdqa [dest],xmm0                          ; write result
     loop_end 16,12
     epilog
@@ -406,14 +407,14 @@ parng_predict_scanline_up_strided_24bpp:
     loop_start
     movd xmm0,[prev]                            ; xmm0 = prev
     movd xmm1,[src]                             ; xmm1 = src
-    paddb xmm0,xmm1                             ; xmm1 = prev + src (24bpp)
-    pshufb xmm0,xmm2                            ; xmm1 = prev + src (32bpp)
+    paddb xmm0,xmm1                             ; xmm0 = prev + src (24bpp)
+    pshufb xmm0,xmm2                            ; xmm0 = prev + src (32bpp)
     movd [dest],xmm0                            ; write result
     loop_end_stride 3
     epilog
 
 ; parng_predict_scanline_up_packed_16bpp(uint8x4 *dest,
-;                                        uint8 *src,
+;                                        uint8x2 *src,
 ;                                        uint8x4 *prev,
 ;                                        uint64_t length,
 ;                                        uint64_t stride)
@@ -424,7 +425,7 @@ parng_predict_scanline_up_packed_16bpp:
     movdqa xmm0,[prev]                          ; xmm0 = prev
     movdqu xmm1,[src]                           ; xmm1 = src (16bpp)
     pshufb xmm1,xmm2                            ; xmm1 = src (32bpp)
-    paddb xmm0,xmm1                             ; xmm0 = prev + this
+    paddb xmm0,xmm1                             ; xmm0 = prev + src
     movdqa [dest],xmm0                          ; write result
     loop_end 16,8
     epilog
@@ -439,9 +440,9 @@ parng_predict_scanline_up_packed_8bpp:
     load_8bpp_to_32bpp_shuffle_mask xmm2        ; xmm2 = 8bpp → 32bpp shuffle mask
     loop_start
     movdqa xmm0,[prev]                          ; xmm0 = prev
-    movdqu xmm1,[src]                           ; xmm1 = src (24bpp)
+    movdqu xmm1,[src]                           ; xmm1 = src (8bpp)
     pshufb xmm1,xmm2                            ; xmm1 = src (32bpp)
-    paddb xmm0,xmm1                             ; xmm0 = prev + this
+    paddb xmm0,xmm1                             ; xmm0 = prev + src
     movdqa [dest],xmm0                          ; write result
     loop_end 16,12
     epilog

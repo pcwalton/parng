@@ -2,34 +2,102 @@
 ;
 ; Copyright (c) 2016 Mozilla Foundation
 
-.globl parng_predict_scanline_none_packed_32bpp
-.globl parng_predict_scanline_none_strided_32bpp
-.globl parng_predict_scanline_none_packed_24bpp
-.globl parng_predict_scanline_none_strided_24bpp
-.globl parng_predict_scanline_none_packed_16bpp
-.globl parng_predict_scanline_none_packed_8bpp
-.globl parng_predict_scanline_left_packed_32bpp
-.globl parng_predict_scanline_left_strided_32bpp
-.globl parng_predict_scanline_left_packed_24bpp
-.globl parng_predict_scanline_left_strided_24bpp
-.globl parng_predict_scanline_left_packed_16bpp
-.globl parng_predict_scanline_left_packed_8bpp
-.globl parng_predict_scanline_up_packed_32bpp
-.globl parng_predict_scanline_up_strided_32bpp
-.globl parng_predict_scanline_up_packed_24bpp
-.globl parng_predict_scanline_up_strided_24bpp
-.globl parng_predict_scanline_up_packed_16bpp
-.globl parng_predict_scanline_up_packed_8bpp
-.globl parng_predict_scanline_average_strided_32bpp
-.globl parng_predict_scanline_average_strided_24bpp
-.globl parng_predict_scanline_paeth_strided_32bpp
-.globl parng_predict_scanline_paeth_strided_24bpp
+.global parng_predict_scanline_none_packed_32bpp
+.global parng_predict_scanline_none_strided_32bpp
+.global parng_predict_scanline_none_packed_24bpp
+.global parng_predict_scanline_none_strided_24bpp
+.global parng_predict_scanline_none_packed_16bpp
+.global parng_predict_scanline_none_packed_8bpp
+.global parng_predict_scanline_left_packed_32bpp
+.global parng_predict_scanline_left_strided_32bpp
+.global parng_predict_scanline_left_packed_24bpp
+.global parng_predict_scanline_left_strided_24bpp
+.global parng_predict_scanline_left_packed_16bpp
+.global parng_predict_scanline_left_packed_8bpp
+.global parng_predict_scanline_up_packed_32bpp
+.global parng_predict_scanline_up_strided_32bpp
+.global parng_predict_scanline_up_packed_24bpp
+.global parng_predict_scanline_up_strided_24bpp
+.global parng_predict_scanline_up_packed_16bpp
+.global parng_predict_scanline_up_packed_8bpp
+.global parng_predict_scanline_average_strided_32bpp
+.global parng_predict_scanline_average_strided_24bpp
+.global parng_predict_scanline_paeth_strided_32bpp
+.global parng_predict_scanline_paeth_strided_24bpp
+
+#define dest r0
+#define src r1
+#define prev r2
+#define length r3
+#define stride r4
+
+.macro dest
+    r9
+
+
+.section text
+
+; Helper functions to factor out the unsafe memory accesses in one place follow.
+
+.macro prolog
+    stmfd sp!,{r4-r6}
+    ldr stride,[sp+5*4]
+.endm
+
+.macro loop_start
+    prolog
+    mov r5,#0
+loop$
+.endm
+
+.macro loop_end dest_stride, src_stride
+    add r5,r5,#\dest_stride
+    add r6,r6,#\dest_stride
+    cmp r5,length
+    blo loop
+.endm
+
+.macro epilog
+    ldmfd sp!,{r4-r6,pc}
+.endm
+
+; #begin-safe-code
+
+; load_8bpp_to_32bpp_table_lookup_mask(r32 dest_hi, r32 dest_lo)
+;
+; Register clobbers: r6
+.macro load_8bpp_to_32bpp_table_lookup_mask dest_hi, dest_lo
+    mov r6,=0x01010101
+    vmov a_dest_hi,r6
+    mov r6,#0
+    vmov a_dest_lo,r6
+.endm
+
+; load_16bpp_to_32bpp_table_lookup_mask(r32 dest_hi, r32 dest_lo)
+;
+; Register clobbers: r6
+.macro load_16bpp_to_32bpp_table_lookup_mask dest_hi, dest_lo
+    mov r6,#0xffff0302
+    vmov a_dest_hi,r6
+    mov r6,#0xffff0100
+    vmov a_dest_lo,r6
+.endm
+
+; load_24bpp_to_32bpp_table_lookup_mask(r32 dest_hi, r32 dest_lo)
+;
+; Register clobbers: r6
+.macro load_24bpp_to_32bpp_table_lookup_mask(r32 dest_hi, r32 dest_lo)
+    mov r6,=0xff050403
+    vmov dest_hi,r6
+    mov r6,=0xff020100
+    vmov dest_lo,r6
+.endm
 
 ; parng_predict_scanline_none_packed_32bpp(uint8x4 *dest,
 ;                                          uint8x4 *src,
 ;                                          uint8x4 *prev,
-;                                          uint64_t length,
-;                                          uint64_t stride)
+;                                          uint32_t length,
+;                                          uint32_t stride)
 parng_predict_scanline_none_packed_32bpp:
     prolog
     loop_start
@@ -41,25 +109,25 @@ parng_predict_scanline_none_packed_32bpp:
 ; parng_predict_scanline_none_strided_32bpp(uint8x4 *dest,
 ;                                           uint8x4 *src,
 ;                                           uint8x4 *prev,
-;                                           uint64_t length,
-;                                           uint64_t stride)
+;                                           uint32_t length,
+;                                           uint32_t stride)
 parng_predict_scanline_none_strided_32bpp:
     prolog
     loop_start
-    ldr r5,[src]
-    str r5,[src]
+    ldr r6,[src]
+    str r6,[src]
     loop_end_stride 4
     epilog
 
 ; parng_predict_scanline_none_packed_24bpp(uint8x4 *dest,
 ;                                          uint8x4 *src,
 ;                                          uint8x4 *prev,
-;                                          uint64_t length,
-;                                          uint64_t stride)
+;                                          uint32_t length,
+;                                          uint32_t stride)
 parng_predict_scanline_none_packed_24bpp:
     prolog
     loop_start
-    load_24bpp_to_32bpp_table_lookup_mask d1
+    load_24bpp_to_32bpp_table_lookup_mask s3,s2
     vld4.16 {d0},[src]
     vtbl.8 d0,{d2,d3},d0
     vst4.16 {d0},[dest]
@@ -69,25 +137,25 @@ parng_predict_scanline_none_packed_24bpp:
 ; parng_predict_scanline_none_strided_24bpp(uint8x4 *dest,
 ;                                           uint8x4 *src,
 ;                                           uint8x4 *prev,
-;                                           uint64_t length,
-;                                           uint64_t stride)
+;                                           uint32_t length,
+;                                           uint32_t stride)
 parng_predict_scanline_none_strided_24bpp:
     prolog
     loop_start
-    ldr r5,[src]
-    bic r5,#0xff000000
-    str r5,[dest]
+    ldr r6,[src]
+    bic r6,#0xff000000
+    str r6,[dest]
     loop_end_stride 4
     epilog
 
 ; parng_predict_scanline_none_packed_16bpp(uint8x4 *dest,
 ;                                          uint8x4 *src,
 ;                                          uint8x4 *prev,
-;                                          uint64_t length,
-;                                          uint64_t stride)
+;                                          uint32_t length,
+;                                          uint32_t stride)
 parng_predict_scanline_none_packed_16bpp:
     prolog
-    load_16bpp_to_32bpp_table_lookup_mask d1
+    load_16bpp_to_32bpp_table_lookup_mask s3,s2
     loop_start
     vld4.8 {d0},[src]
     vtbl.8 d0,d1,d0
@@ -98,11 +166,11 @@ parng_predict_scanline_none_packed_16bpp:
 ; parng_predict_scanline_none_packed_8bpp(uint8x4 *dest,
 ;                                         uint8x4 *src,
 ;                                         uint8x4 *prev,
-;                                         uint64_t length,
-;                                         uint64_t stride)
+;                                         uint32_t length,
+;                                         uint32_t stride)
 parng_predict_scanline_none_packed_8bpp:
     prolog
-    load_8bpp_to_32bpp_table_lookup_mask d1
+    load_8bpp_to_32bpp_table_lookup_mask s3,s2
     loop_start
     vld2.8 {d0},[src]
     vtbl.8 d0,d1,d0
@@ -146,8 +214,8 @@ parng_predict_scanline_none_packed_8bpp:
 ; parng_predict_scanline_left_packed_32bpp(uint8x4 *dest,
 ;                                          uint8x4 *src,
 ;                                          uint8x4 *prev,
-;                                          uint64_t length,
-;                                          uint64_t stride)
+;                                          uint32_t length,
+;                                          uint32_t stride)
 parng_predict_scanline_left_packed_32bpp:
     prolog
     veor.u8 q0,q0,q0
@@ -160,8 +228,8 @@ parng_predict_scanline_left_packed_32bpp:
 ; parng_predict_scanline_left_strided_32bpp(uint8x4 *dest,
 ;                                           uint8x4 *src,
 ;                                           uint8x4 *prev,
-;                                           uint64_t length,
-;                                           uint64_t stride)
+;                                           uint32_t length,
+;                                           uint32_t stride)
 parng_predict_scanline_left_strided_32bpp:
     prolog
     veor.u8 d0,d0,d0
@@ -175,11 +243,11 @@ parng_predict_scanline_left_strided_32bpp:
 ; parng_predict_scanline_left_packed_24bpp(uint8x4 *dest,
 ;                                          uint8x3 *src,
 ;                                          uint8x4 *prev,
-;                                          uint64_t length,
-;                                          uint64_t stride)
+;                                          uint32_t length,
+;                                          uint32_t stride)
 parng_predict_scanline_left_packed_24bpp:
     prolog
-    load_24bpp_to_32bpp_table_lookup_mask d3
+    load_24bpp_to_32bpp_table_lookup_mask s7,s6
     load_32bpp_opaque_alpha_mask d4
     veor.u8 d0,d0,d0        ; d0 = [ 0 ]
     loop_start
@@ -194,14 +262,14 @@ parng_predict_scanline_left_packed_24bpp:
 ; parng_predict_scanline_left_strided_24bpp(uint8x4 *dest,
 ;                                           uint8x3 *src,
 ;                                           uint8x4 *prev,
-;                                           uint64_t length,
-;                                           uint64_t stride)
+;                                           uint32_t length,
+;                                           uint32_t stride)
 ;
 ; TODO(pcwalton): This could save a cycle or two by leaving 0xff somewhere in d1 and having the
 ; mask fetch it.
 parng_predict_scanline_left_strided_24bpp:
     prolog
-    load_24bpp_to_32bpp_table_lookup_mask d3
+    load_24bpp_to_32bpp_table_lookup_mask s7,s6
     load_32bpp_opaque_alpha_mask d4
     veor.u8 d0,d0,d0        ; d0 = [ 0 ]
     loop_start
@@ -216,11 +284,11 @@ parng_predict_scanline_left_strided_24bpp:
 ; parng_predict_scanline_left_packed_16bpp(uint8x4 *dest,
 ;                                          uint8x3 *src,
 ;                                          uint8x4 *prev,
-;                                          uint64_t length,
-;                                          uint64_t stride)
+;                                          uint32_t length,
+;                                          uint32_t stride)
 parng_predict_scanline_left_packed_16bpp:
     prolog
-    load_16bpp_to_32bpp_table_lookup_mask d7
+    load_16bpp_to_32bpp_table_lookup_mask s15,s14
     veor.u8 q0,q0,q0        ; d1 = [ 0 ], d0 = [ 0 ]
     veor.u8 d2,d2,d2        ; d2 = [ 0 ]
     loop_start
@@ -234,11 +302,11 @@ parng_predict_scanline_left_packed_16bpp:
 ; parng_predict_scanline_left_packed_8bpp(uint8x4 *dest,
 ;                                         uint8x3 *src,
 ;                                         uint8x4 *prev,
-;                                         uint64_t length,
-;                                         uint64_t stride)
+;                                         uint32_t length,
+;                                         uint32_t stride)
 parng_predict_scanline_left_packed_8bpp:
     prolog
-    load_8bpp_to_32bpp_shuffle_mask d7
+    load_8bpp_to_32bpp_shuffle_mask s15,s14
     veor.u8 q0,q0,q0        ; d1 = [ 0 ], d0 = [ 0 ]
     veor.u8 d2,d2,d2        ; d2 = [ 0 ]
     loop_start
@@ -252,8 +320,8 @@ parng_predict_scanline_left_packed_8bpp:
 ; parng_predict_scanline_up_packed_32bpp(uint8x4 *dest,
 ;                                        uint8x4 *src,
 ;                                        uint8x4 *prev,
-;                                        uint64_t length,
-;                                        uint64_t stride)
+;                                        uint32_t length,
+;                                        uint32_t stride)
 parng_predict_scanline_up_packed_32bpp:
     prolog
     loop_start
@@ -267,8 +335,8 @@ parng_predict_scanline_up_packed_32bpp:
 ; parng_predict_scanline_up_strided_32bpp(uint8x4 *dest,
 ;                                         uint8x4 *src,
 ;                                         uint8x4 *prev,
-;                                         uint64_t length,
-;                                         uint64_t stride)
+;                                         uint32_t length,
+;                                         uint32_t stride)
 parng_predict_scanline_up_strided_32bpp:
     prolog
     loop_start
@@ -282,13 +350,13 @@ parng_predict_scanline_up_strided_32bpp:
 ; parng_predict_scanline_up_packed_24bpp(uint8x4 *dest,
 ;                                        uint8x3 *src,
 ;                                        uint8x4 *prev,
-;                                        uint64_t length,
-;                                        uint64_t stride)
+;                                        uint32_t length,
+;                                        uint32_t stride)
 ;
 ; There is no need to make the alpha opaque here as long as the previous scanline had opaque alpha.
 parng_predict_scanline_up_packed_24bpp:
     prolog
-    load_24bpp_to_32bpp_table_lookup_mask d7
+    load_24bpp_to_32bpp_table_lookup_mask s15,s14
     loop_start
     vld4.16 {d0},[prev]     ; d0 = prev
     vld4.16 {d1},[src]      ; d1 = src (24bpp)
@@ -301,13 +369,13 @@ parng_predict_scanline_up_packed_24bpp:
 ; parng_predict_scanline_up_strided_24bpp(uint8x4 *dest,
 ;                                         uint8x3 *src,
 ;                                         uint8x4 *prev,
-;                                         uint64_t length,
-;                                         uint64_t stride)
+;                                         uint32_t length,
+;                                         uint32_t stride)
 ;
 ; There is no need to make the alpha opaque here as long as the previous scanline had opaque alpha.
 parng_predict_scanline_up_strided_24bpp:
     prolog
-    load_24bpp_to_32bpp_table_lookup_mask d7
+    load_24bpp_to_32bpp_table_lookup_mask s15,s14
     loop_start
     vld4.8 {d0},[prev]      ; d0 = prev
     vld4.8 {d1},[src]       ; d1 = src
@@ -320,11 +388,11 @@ parng_predict_scanline_up_strided_24bpp:
 ; parng_predict_scanline_up_packed_16bpp(uint8x4 *dest,
 ;                                        uint8x2 *src,
 ;                                        uint8x4 *prev,
-;                                        uint64_t length,
-;                                        uint64_t stride)
+;                                        uint32_t length,
+;                                        uint32_t stride)
 parng_predict_scanline_up_packed_16bpp:
     prolog
-    load_16bpp_to_32bpp_table_lookup_mask d7
+    load_16bpp_to_32bpp_table_lookup_mask s15,s14
     loop_start
     vld2.16 {d0},[prev]     ; d0 = prev
     vld2.16 {d1},[src]      ; d1 = src (16bpp)
@@ -337,11 +405,11 @@ parng_predict_scanline_up_packed_16bpp:
 ; parng_predict_scanline_up_packed_8bpp(uint8x4 *dest,
 ;                                       uint8 *src,
 ;                                       uint8x4 *prev,
-;                                       uint64_t length,
-;                                       uint64_t stride)
+;                                       uint32_t length,
+;                                       uint32_t stride)
 parng_predict_scanline_up_packed_8bpp:
     prolog
-    load_8bpp_to_32bpp_table_lookup_mask d7
+    load_8bpp_to_32bpp_table_lookup_mask s15,s14
     loop_start
     vld2.32 {d0},[prev]     ; d0 = prev
     vld2.8 d1,[src]         ; d1 = src (8bpp)
@@ -354,8 +422,8 @@ parng_predict_scanline_up_packed_8bpp:
 ; parng_predict_scanline_average_strided_32bpp(uint8x4 *dest,
 ;                                              uint8x4 *src,
 ;                                              uint8x4 *prev,
-;                                              uint64_t length,
-;                                              uint64_t stride)
+;                                              uint32_t length,
+;                                              uint32_t stride)
 parng_predict_scanline_average_strided_32bpp:
     prolog
     veor.u8 d0,d0,d0    ; d0 = [ 0 ]
@@ -371,8 +439,8 @@ parng_predict_scanline_average_strided_32bpp:
 ; parng_predict_scanline_average_strided_24bpp(uint8x4 *dest,
 ;                                              uint8x3 *src,
 ;                                              uint8x4 *prev,
-;                                              uint64_t length,
-;                                              uint64_t stride)
+;                                              uint32_t length,
+;                                              uint32_t stride)
 ;
 ; There is no need to make the alpha opaque here as long as the previous scanline had opaque alpha.
 parng_predict_scanline_average_strided_24bpp:
@@ -416,8 +484,8 @@ parng_predict_scanline_average_strided_24bpp:
 ; parng_predict_scanline_paeth_strided_32bpp(uint8x4 *dest,
 ;                                            uint8x4 *src,
 ;                                            uint8x4 *prev,
-;                                            uint64_t length,
-;                                            uint64_t stride)
+;                                            uint32_t length,
+;                                            uint32_t stride)
 parng_predict_scanline_paeth_strided_32bpp:
     prolog
     veor.u8 d0,d0,d0            ; d0 = [ 0 ]
@@ -433,8 +501,8 @@ parng_predict_scanline_paeth_strided_32bpp:
 ; parng_predict_scanline_paeth_strided_24bpp(uint8x4 *dest,
 ;                                            uint8x3 *src,
 ;                                            uint8x4 *prev,
-;                                            uint64_t length,
-;                                            uint64_t stride)
+;                                            uint32_t length,
+;                                            uint32_t stride)
 parng_predict_scanline_paeth_strided_24bpp:
     prolog
     veor.u8 d0,d0,d0            ; d0 = [ 0 ]
@@ -443,9 +511,9 @@ parng_predict_scanline_paeth_strided_24bpp:
     loop_start
     vld4.8 {d1},[prev]          ; d1 = prev (8-bit)
     predict_pixels_paeth src    ; d0 = result
-    vmov r5,d0
-    orr r5,r5,#0xff000000
-    str r5,[dest]               ; write result
+    vmov r6,d0
+    orr r6,r6,#0xff000000
+    str r6,[dest]               ; write result
     loop_end_stride 3
     epilog
 

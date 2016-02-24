@@ -15,7 +15,8 @@
 struct decoded_image {
     uint32_t width;
     uint32_t height;
-    uint8_t *pixels;
+    uint8_t *rgba_pixels;
+    uint8_t *indexed_pixels;
 
     bool finished;
     pthread_mutex_t finished_mutex;
@@ -61,11 +62,11 @@ static parng_io_error seek_in_file(int64_t position,
     return PARNG_SUCCESS;
 }
 
-static void get_scanline_data(int32_t reference_scanline,
-                              uint32_t current_scanline,
-                              parng_level_of_detail lod,
-                              parng_scanline_data *data,
-                              void *user_data) {
+static void fetch_scanlines_for_prediction(int32_t reference_scanline,
+                                           uint32_t current_scanline,
+                                           parng_level_of_detail lod,
+                                           parng_scanlines_for_prediction *scanlines,
+                                           void *user_data) {
     struct decoded_image *decoded_image = (struct decoded_image *)user_data;
     assert(reference_scanline <= (int32_t)decoded_image->height);
     assert(current_scanline <= decoded_image->height);
@@ -84,16 +85,34 @@ static void get_scanline_data(int32_t reference_scanline,
     if (reference_scanline >= 0) {
         uintptr_t start = reference_interlacing_info.y * aligned_stride +
             reference_interlacing_info.offset;
-        data->reference_scanline = &decoded_image->pixels[start];
-        data->reference_scanline_length = aligned_stride;
+        scanlines->reference_scanline = &decoded_image->rgba_pixels[start];
+        scanlines->reference_scanline_length = aligned_stride;
     }
 
     uintptr_t start = current_interlacing_info.y * aligned_stride +
         current_interlacing_info.offset;
-    data->current_scanline = &decoded_image->pixels[start];
-    data->current_scanline_length = aligned_stride;
+    scanlines->current_scanline = &decoded_image->pixels[start];
+    scanlines->current_scanline_length = aligned_stride;
 
-    data->stride = current_interlacing_info.stride;
+    scanlines->stride = current_interlacing_info.stride;
+}
+
+static void fetch_scanlines_for_rgba_conversion(uint32_t scanline,
+                                                parng_level_of_detail lod,
+                                                parng_scanlines_for_rgba_conversion *scanlines,
+                                                void *user_data) {
+    struct decoded_image *decoded_image = (struct decoded_image *)user_data;
+    assert(scanline <= (int32_t)decoded_image->height);
+
+    parng_interlacing_info rgba_interlacing_info, indexed_interlacing_info;
+    parng_interlacing_info_init(&rgba_interlacing_info, scanline, OUTPUT_BPP * 8, lod);
+    parng_interlacing_info_init(&indexed_interlacing_info, scanline, 1 * 8, lod);
+    
+    uintptr_t aligned_stride = parng_image_loader_align(decoded_image->width * 4);
+    scanlines->rgba_scanline = &decoded_image->rgba_pixels;
+    scanlines->indexed_scanline = &decoded_image->indexed_pixels;
+    scanlines->rgba_scanline_length = scanlines->indexed_scanline_length = aligned_stride;
+    scanlines->rgba_stride = scanlines->indexed_stride = current_interlacing_info.stride;
 }
 
 void extract_data(void *user_data) {

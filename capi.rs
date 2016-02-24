@@ -130,16 +130,32 @@ pub struct parng_scanlines_for_prediction {
     pub stride: u8,
 }
 
+#[repr(C)]
+pub struct parng_scanlines_for_rgba_conversion {
+    pub rgba_scanline: *mut u8,
+    pub rgba_scanline_length: size_t,
+    pub indexed_scanline: *const u8,
+    pub indexed_scanline_length: size_t,
+    pub rgba_stride: u8,
+    pub indexed_stride: u8,
+}
+
 /// The fields of this structure are intentionally private so that the rest of `parng` can't
 /// violate memory safety.
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct parng_data_provider {
-    get_scanline_data: extern "C" fn(reference_scanline: i32,
-                                     current_scanline: u32,
-                                     lod: parng_level_of_detail,
-                                     data: *mut parng_scanlines_for_prediction,
-                                     user_data: *mut c_void),
+    fetch_scanlines_for_prediction: extern "C" fn(reference_scanline: i32,
+                                                  current_scanline: u32,
+                                                  lod: parng_level_of_detail,
+                                                  indexed: i32,
+                                                  scanlines: *mut parng_scanlines_for_prediction,
+                                                  user_data: *mut c_void),
+    fetch_scanlines_for_rgba_conversion:
+        extern "C" fn(scanline: u32,
+                      lod: parng_level_of_detail,
+                      scanlines: *mut parng_scanlines_for_rgba_conversion,
+                      user_data: *mut c_void),
     extract_data: extern "C" fn(user_data: *mut c_void),
     user_data: *mut c_void,
 }
@@ -166,18 +182,40 @@ impl DataProvider for parng_data_provider {
                 Some(reference_scanline) => reference_scanline as i32,
             };
             let c_lod = level_of_detail_to_c_level_of_detail(lod);
-            (self.get_scanline_data)(c_reference_scanline,
-                                     current_scanline,
-                                     c_lod,
-                                     &mut c_scanlines_for_prediction,
-                                     self.user_data);
+            let c_indexed = if indexed {
+                1
+            } else {
+                0
+            };
+            (self.fetch_scanlines_for_prediction)(c_reference_scanline,
+                                                  current_scanline,
+                                                  c_lod,
+                                                  c_indexed,
+                                                  &mut c_scanlines_for_prediction,
+                                                  self.user_data);
             c_scanlines_for_prediction_to_scanlines_for_prediction(&c_scanlines_for_prediction)
         }
     }
 
     fn fetch_scanlines_for_rgba_conversion<'a>(&'a mut self, scanline: u32, lod: LevelOfDetail)
                                                -> ScanlinesForRgbaConversion<'a> {
-        panic!("TODO fetch_scanlines_for_rgba_conversion")
+       unsafe {
+           let mut c_scanlines_for_rgba_conversion = parng_scanlines_for_rgba_conversion {
+               rgba_scanline: ptr::null_mut(),
+               rgba_scanline_length: 0,
+               indexed_scanline: ptr::null(),
+               indexed_scanline_length: 0,
+               rgba_stride: 0,
+               indexed_stride: 0,
+           };
+           let c_lod = level_of_detail_to_c_level_of_detail(lod);
+           (self.fetch_scanlines_for_rgba_conversion)(scanline,
+                                                      c_lod,
+                                                      &mut c_scanlines_for_rgba_conversion,
+                                                      self.user_data);
+           c_scanlines_for_rgba_conversion_to_scanlines_for_rgba_conversion(
+               &c_scanlines_for_rgba_conversion)
+       }
     }
 
     fn extract_data(&mut self) {
@@ -340,6 +378,21 @@ unsafe fn c_scanlines_for_prediction_to_scanlines_for_prediction(
                               (*c_scanlines_for_prediction).current_scanline,
                               (*c_scanlines_for_prediction).current_scanline_length),
         stride: (*c_scanlines_for_prediction).stride,
+    }
+}
+
+unsafe fn c_scanlines_for_rgba_conversion_to_scanlines_for_rgba_conversion(
+        c_scanlines_for_rgba_conversion: *const parng_scanlines_for_rgba_conversion)
+         -> ScanlinesForRgbaConversion<'static> {
+    ScanlinesForRgbaConversion {
+        rgba_scanline: slice::from_raw_parts_mut(
+                           (*c_scanlines_for_rgba_conversion).rgba_scanline,
+                           (*c_scanlines_for_rgba_conversion).rgba_scanline_length),
+        indexed_scanline: slice::from_raw_parts(
+            (*c_scanlines_for_rgba_conversion).indexed_scanline,
+            (*c_scanlines_for_rgba_conversion).indexed_scanline_length),
+        rgba_stride: (*c_scanlines_for_rgba_conversion).rgba_stride,
+        indexed_stride: (*c_scanlines_for_rgba_conversion).indexed_stride,
     }
 }
 

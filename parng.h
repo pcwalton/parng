@@ -60,7 +60,8 @@ typedef uint32_t parng_io_error;
 typedef uint32_t parng_level_of_detail;
 typedef struct parng_metadata parng_metadata;
 typedef struct parng_reader parng_reader;
-typedef struct parng_scanline_data parng_scanline_data;
+typedef struct parng_scanlines_for_prediction parng_scanlines_for_prediction;
+typedef struct parng_scanlines_for_rgba_conversion parng_scanlines_for_rgba_conversion;
 typedef uint32_t parng_seek_from;
 
 struct parng_reader {
@@ -75,20 +76,33 @@ struct parng_reader {
     void *user_data;
 };
 
-struct parng_scanline_data {
+struct parng_scanlines_for_prediction {
     uint8_t *reference_scanline;
     size_t reference_scanline_length;
-    uint8_t *current_scanline;
+    const uint8_t *current_scanline;
     size_t current_scanline_length;
     uint8_t stride;
 };
 
+struct parng_scanlines_for_rgba_conversion {
+    uint8_t *rgba_scanline;
+    size_t rgba_scanline_length;
+    const uint8_t *indexed_scanline;
+    size_t indexed_scanline_length;
+    uint8_t rgba_stride;
+    uint8_t indexed_stride;
+};
+
 struct parng_data_provider {
-    void (*get_scanline_data)(int32_t reference_scanline,
-                              uint32_t current_scanline,
-                              parng_level_of_detail lod,
-                              parng_scanline_data *data,
-                              void *user_data);
+    void (*fetch_scanlines_for_prediction)(int32_t reference_scanline,
+                                           uint32_t current_scanline,
+                                           parng_level_of_detail lod,
+                                           parng_scanlines_for_prediction *scanlines,
+                                           void *user_data);
+    void (*fetch_scanlines_for_rgba_conversion)(uint32_t scanline,
+                                                parng_level_of_detail lod,
+                                                parng_scanlines_for_rgba_conversion *scanlines,
+                                                void *user_data);
     void (*extract_data)(void *user_data);
     void *user_data;
 };

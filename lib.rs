@@ -22,12 +22,10 @@ mod prediction;
 #[cfg(test)]
 pub mod test;
 
-/// An error 
 #[derive(Debug)]
 pub enum PngError {
     Io(io::Error),
     InvalidMetadata(String),
-    InvalidData(String),
     InvalidScanlinePredictor(u8),
     EntropyDecodingError,
     NoMetadata,

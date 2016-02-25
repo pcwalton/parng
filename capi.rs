@@ -41,11 +41,10 @@ pub const PARNG_COMPRESSION_METHOD_DEFLATE: u32 = 0;
 pub const PARNG_SUCCESS: u32 = 0;
 pub const PARNG_ERROR_IO: u32 = 1;
 pub const PARNG_ERROR_INVALID_METADATA: u32 = 2;
-pub const PARNG_ERROR_INVALID_DATA: u32 = 3;
-pub const PARNG_ERROR_INVALID_SCANLINE_PREDICTOR: u32 = 4;
-pub const PARNG_ERROR_ENTROPY_DECODING_ERROR: u32 = 5;
-pub const PARNG_ERROR_NO_METADATA: u32 = 6;
-pub const PARNG_ERROR_NO_DATA_PROVIDER: u32 = 7;
+pub const PARNG_ERROR_INVALID_SCANLINE_PREDICTOR: u32 = 3;
+pub const PARNG_ERROR_ENTROPY_DECODING_ERROR: u32 = 4;
+pub const PARNG_ERROR_NO_METADATA: u32 = 5;
+pub const PARNG_ERROR_NO_DATA_PROVIDER: u32 = 6;
 
 pub const PARNG_FILTER_METHOD_ADAPTIVE: u32 = 0;
 
@@ -327,7 +326,6 @@ fn png_error_to_c_error(err: PngError) -> parng_error {
     match err {
         PngError::Io(_) => PARNG_ERROR_IO,
         PngError::InvalidMetadata(_) => PARNG_ERROR_INVALID_METADATA,
-        PngError::InvalidData(_) => PARNG_ERROR_INVALID_DATA,
         PngError::InvalidScanlinePredictor(_) => PARNG_ERROR_INVALID_SCANLINE_PREDICTOR,
         PngError::EntropyDecodingError => PARNG_ERROR_ENTROPY_DECODING_ERROR,
         PngError::NoMetadata => PARNG_ERROR_INVALID_METADATA,

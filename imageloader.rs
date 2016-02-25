@@ -635,20 +635,53 @@ pub trait DataProvider : Send {
     /// This method will be called only if the image is not RGBA.
     fn fetch_scanlines_for_rgba_conversion<'a>(&'a mut self, scanline: u32, lod: LevelOfDetail)
                                                -> ScanlinesForRgbaConversion<'a>;
+
+    /// Called when `parng` has finished RGBA conversion for a scanline, optionally at a specific
+    /// level of detail.
+    ///
+    /// This method will be called only if the image is not RGBA.
     fn rgba_conversion_complete_for_scanline(&mut self, scanline: u32, lod: LevelOfDetail);
+
+    /// Called when `parng` has completely finished decoding the image.
     fn finished(&mut self);
 }
 
+/// Data providers use this structure to supply scanlines to `parng` in response to prediction
+/// requests.
 pub struct ScanlinesForPrediction<'a> {
+    /// The pixels of the reference scanline. This must be present if `parng` requested a reference
+    /// scanline. There must be 4 bytes per pixel available in this array for truecolor modes (i.e.
+    /// when the `indexed` parameter is false), while for indexed modes (i.e. when the `indexed`
+    /// parameter is true) there must be 1 byte per pixel available.
     pub reference_scanline: Option<&'a mut [u8]>,
+
+    /// The pixels of the current scanline. As with the reference scanline, there must be 4 bytes
+    /// per pixel available in this array for truecolor modes, and for indexed modes there must be
+    /// 1 byte per pixel available.
     pub current_scanline: &'a mut [u8],
+
+    /// The number of bytes between individual pixels in `reference_scanline` and
+    /// `current_scanline`. For truecolor modes, this must be at least 4. You are free to set any
+    /// number of bytes here.
+    ///
+    /// This field is useful for in-place deinterlacing.
     pub stride: u8,
 }
 
+/// Data providers use this structure to supply scanlines to `parng` in response to RGBA conversion
+/// requests.
 pub struct ScanlinesForRgbaConversion<'a> {
+    /// The pixels of the RGBA scanline. There must be 4 bytes per pixel available in this array.
     pub rgba_scanline: &'a mut [u8],
+    /// The pixels of the indexed scanline. There must be 1 byte per pixel available in this array.
     pub indexed_scanline: &'a [u8],
+    /// The number of bytes between individiual pixels in `rgba_scanline`. This must be at least 4.
+    ///
+    /// This field is useful for in-place deinterlacing.
     pub rgba_stride: u8,
+    /// The number of bytes between individiual pixels in `indexed_scanline`.
+    ///
+    /// This field is useful for in-place deinterlacing.
     pub indexed_stride: u8,
 }
 
@@ -675,14 +708,26 @@ pub fn align(address: usize) -> usize {
     }
 }
 
+/// Information about a specific scanline for one level of detail in an interlaced image. This
+/// object exists for the convenience of data providers, so that they do not have to hardcode
+/// information about Adam7 interlacing.
 #[derive(Copy, Clone, Debug)]
 pub struct InterlacingInfo {
+    /// The row of this scanline within the final, deinterlaced image. 0 represents the first row.
     pub y: u32,
+    /// The number of bytes between individual pixels for this scanline in the final, deinterlaced
+    /// image.
     pub stride: u8,
+    /// The byte offset of the first pixel within this scanline in the final, deinterlaced image.
     pub offset: u8,
 }
 
 impl InterlacingInfo {
+    /// Creates an `InterlacingInfo` structure that describes the pixel layout of the given
+    /// scanline and level of detail at the given color depth.
+    ///
+    /// `color_depth` specifies the number of bits per pixel. Thus, if you have for instance an
+    /// RGBA image, you supply 32 here. For indexed images, supply 8.
     pub fn new(y: u32, color_depth: u8, lod: LevelOfDetail) -> InterlacingInfo {
         let y_scale_factor = InterlacingInfo::y_scale_factor(lod);
         let color_depth = color_depth / 8;
@@ -722,12 +767,20 @@ struct BufferedScanlineInfo {
     lod: LevelOfDetail,
 }
 
+/// A specific level of detail of an interlaced image.
+///
+/// Normal PNG interlacing is known as Adam7 interlacing, which has 7 levels of detail, from 0
+/// (the smallest; i.e. the blurriest) to 7 (the largest; i.e. the sharpest).
 #[derive(Copy, Clone, PartialEq, PartialOrd, Debug)]
 pub enum LevelOfDetail {
+    /// The sole level of detail in a non-interlaced image.
     None,
+    /// An level of detail in the standard interlacing strategy, known as Adam7. Adam7 has 7 levels
+    /// of detail, from 0 (the smallest; i.e. the blurriest) to 7 (the largest; i.e. the sharpest).
     Adam7(u8),
 }
 
+/// Represents the contents of a `tRNS` chunk.
 #[derive(Debug)]
 pub enum Transparency {
     None,

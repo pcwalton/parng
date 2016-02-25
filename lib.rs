@@ -3,6 +3,9 @@
 // Copyright (c) 2016 Mozilla Foundation
 
 //! A parallel PNG decoder.
+//!
+//! For the simple API, see the `simple` module. For the more complex but more flexible API, see
+//! the `imageloader` module.
 
 extern crate byteorder;
 extern crate flate2;
@@ -19,12 +22,11 @@ mod prediction;
 #[cfg(test)]
 pub mod test;
 
+/// An error 
 #[derive(Debug)]
 pub enum PngError {
-    NeedMoreData,
     Io(io::Error),
     InvalidMetadata(String),
-    InvalidOperation(&'static str),
     InvalidData(String),
     InvalidScanlinePredictor(u8),
     EntropyDecodingError,

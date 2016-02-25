@@ -75,8 +75,6 @@ impl ImageLoader {
 
             match self.decode_state {
                 DecodeState::Start => {
-                    let initial_pos =
-                        try!(reader.seek(SeekFrom::Current(0)).map_err(PngError::Io));
                     match Metadata::load(reader) {
                         Ok(metadata) => {
                             self.current_lod = match metadata.interlace_method {
@@ -93,21 +91,11 @@ impl ImageLoader {
                             self.metadata = Some(metadata);
                             return Ok(AddDataResult::Continue)
                         }
-                        Err(PngError::NeedMoreData) => {
-                            try!(reader.seek(SeekFrom::Start(initial_pos)).map_err(PngError::Io));
-                            return Ok(AddDataResult::Continue)
-                        }
                         Err(error) => return Err(error),
                     }
                 }
                 DecodeState::LookingForPalette => {
-                    let initial_pos =
-                        try!(reader.seek(SeekFrom::Current(0)).map_err(PngError::Io));
                     let chunk_header = match ChunkHeader::load(reader) {
-                        Err(PngError::NeedMoreData) => {
-                            try!(reader.seek(SeekFrom::Start(initial_pos)).map_err(PngError::Io));
-                            return Ok(AddDataResult::Continue)
-                        }
                         Err(error) => return Err(error),
                         Ok(chunk_header) => chunk_header,
                     };
@@ -120,13 +108,7 @@ impl ImageLoader {
                     }
                 }
                 DecodeState::LookingForImageData => {
-                    let initial_pos =
-                        try!(reader.seek(SeekFrom::Current(0)).map_err(PngError::Io));
                     let chunk_header = match ChunkHeader::load(reader) {
-                        Err(PngError::NeedMoreData) => {
-                            try!(reader.seek(SeekFrom::Start(initial_pos)).map_err(PngError::Io));
-                            return Ok(AddDataResult::Continue)
-                        }
                         Err(error) => return Err(error),
                         Ok(chunk_header) => chunk_header,
                     };

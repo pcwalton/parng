@@ -2,6 +2,12 @@
 //
 // Copyright (c) 2016 Mozilla Foundation
 
+//! The more complex but more flexible API to decode images.
+//!
+//! This API allows you to access the image data (including all levels of interlaced detail) while
+//! the image is in the process of decoding via the `DataProvider` trait. This trait also allows
+//! for complete control over the layout and storage of image data in memory.
+
 use PngError;
 use byteorder::{self, ReadBytesExt};
 use flate2::{DataError, Decompress, Flush};
@@ -17,6 +23,7 @@ use std::mem;
 const BUFFER_SIZE: usize = 16384;
 const PIXELS_PER_PREDICTION_CHUNK: u32 = 1024;
 
+/// An object that encapsulates the load process for a single image.
 pub struct ImageLoader {
     entropy_decoder: Decompress,
     metadata: Option<Metadata>,
@@ -40,11 +47,13 @@ pub struct ImageLoader {
     decode_state: DecodeState,
 
     predictor_thread_comm: MainThreadToPredictorThreadComm,
+    have_data_provider: bool,
 }
 
 impl ImageLoader {
-    pub fn new() -> Result<ImageLoader,PngError> {
-        Ok(ImageLoader {
+    /// Creates a new image loader ready to decode a PNG image.
+    pub fn new() -> ImageLoader {
+        ImageLoader {
             entropy_decoder: Decompress::new(true),
             metadata: None,
             compressed_data_buffer: vec![],
@@ -62,11 +71,22 @@ impl ImageLoader {
             rgba_conversion_complete: false,
             decode_state: DecodeState::Start,
             predictor_thread_comm: MainThreadToPredictorThreadComm::new(),
-        })
+            have_data_provider: false,
+        }
     }
 
+    /// Decodes image data from the given stream.
+    ///
+    /// Repeated calls to this method will decode an image.
+    ///
+    /// If the metadata has been read (which is checkable ether via `ImageLoader::metadata()` or by
+    /// looking for an `LoadProgress::NeedDataProviderAndMoreData` result), a data provider must
+    /// have be attached to this image loader via `ImageLoader::set_data_provider()` before calling
+    /// this method, or this function will fail with a `PngError::NoDataProvider` error.
+    ///
+    /// Returns an `LoadProgress` value that describes the progress of loading the image.
     #[inline(never)]
-    pub fn add_data<R>(&mut self, reader: &mut R) -> Result<AddDataResult,PngError>
+    pub fn add_data<R>(&mut self, reader: &mut R) -> Result<LoadProgress,PngError>
                        where R: Read + Seek {
         loop {
             while let Ok(msg) = self.predictor_thread_comm.receiver.try_recv() {
@@ -89,7 +109,12 @@ impl ImageLoader {
                             };
 
                             self.metadata = Some(metadata);
-                            return Ok(AddDataResult::Continue)
+
+                            return if self.have_data_provider {
+                                Ok(LoadProgress::NeedMoreData)
+                            } else {
+                                Ok(LoadProgress::NeedDataProviderAndMoreData)
+                            }
                         }
                         Err(error) => return Err(error),
                     }
@@ -120,6 +145,11 @@ impl ImageLoader {
                             self.send_scanlines_to_predictor_thread_to_convert_to_rgba()
                         }
 
+                        self.predictor_thread_comm
+                            .sender
+                            .send(MainThreadToPredictorThreadMsg::Finished)
+                            .unwrap();
+
                         self.decode_state = DecodeState::Finished
                     } else if &chunk_header.chunk_type == b"tRNS" {
                         self.decode_state = DecodeState::ReadingTransparency(chunk_header.length)
@@ -149,6 +179,10 @@ impl ImageLoader {
                     self.decode_state = DecodeState::LookingForImageData
                 }
                 DecodeState::DecodingData(bytes_left_in_chunk) => {
+                    if !self.have_data_provider {
+                        return Err(PngError::NoDataProvider)
+                    }
+
                     let (width, color_depth) = {
                         let metadata = self.metadata.as_ref().expect("No metadata?!");
                         (metadata.dimensions.width, metadata.color_depth)
@@ -189,7 +223,7 @@ impl ImageLoader {
                     // to want to read multiple scanlines at once. Before we do this, though,
                     // we are going to have to deal with SSE alignment restrictions.
                     if avail_in == 0 {
-                        return Ok(AddDataResult::Continue)
+                        return Ok(LoadProgress::NeedMoreData)
                     }
 
                     // Make room for the stride + 32 bytes, which should be enough to
@@ -288,7 +322,7 @@ impl ImageLoader {
                                 Err(byteorder::Error::UnexpectedEOF) => {
                                     try!(reader.seek(SeekFrom::Start(initial_pos))
                                                .map_err(PngError::Io));
-                                    return Ok(AddDataResult::Continue)
+                                    return Ok(LoadProgress::NeedMoreData)
                                 }
                                 Err(byteorder::Error::Io(io_error)) => {
                                     return Err(PngError::Io(io_error))
@@ -305,7 +339,7 @@ impl ImageLoader {
                                 Ok(_) => {
                                     try!(reader.seek(SeekFrom::Start(initial_pos))
                                                .map_err(PngError::Io));
-                                    return Ok(AddDataResult::Continue)
+                                    return Ok(LoadProgress::NeedMoreData)
                                 }
                                 Err(io_error) => return Err(PngError::Io(io_error)),
                             }
@@ -343,16 +377,16 @@ impl ImageLoader {
                     // Keep looking for image data (although we should be done by now).
                     self.decode_state = DecodeState::LookingForImageData
                 }
-                DecodeState::Finished => return Ok(AddDataResult::Finished),
+                DecodeState::Finished => return Ok(LoadProgress::Finished),
             }
         }
     }
 
     #[inline(never)]
     fn send_scanlines_to_predictor_thread_to_predict_if_necessary(&mut self)
-                                                                  -> Result<(),PngError> {
+                                                                  -> Result<(), PngError> {
         let (dimensions, color_depth, color_type) = match self.metadata {
-            None => return Err(PngError::NoMetadata),
+            None => panic!("No metadata read yet?!"),
             Some(ref metadata) => (metadata.dimensions, metadata.color_depth, metadata.color_type),
         };
 
@@ -435,6 +469,12 @@ impl ImageLoader {
         }
     }
 
+    /// Blocks the current thread until the image is fully decoded.
+    ///
+    /// Because `parng` uses a background thread to perform image prediction and color conversion,
+    /// the image may not be fully decoded even when `ImageLoader::add_data()` returns
+    /// `LoadProgress::Finished`. Most applications will therefore want to call this function upon
+    /// receiving `LoadProgress::Finished` from `ImageLoader::add_data()`.
     #[inline(never)]
     pub fn wait_until_finished(&mut self) -> Result<(),PngError> {
         while !self.finished_decoding_altogether() {
@@ -463,22 +503,21 @@ impl ImageLoader {
             (!indexed || self.rgba_conversion_complete)
     }
 
+    /// Attaches a data provider to this image loader.
+    ///
+    /// This can be called at any time, but it must be called prior to calling
+    /// `ImageLoader::add_data()` if the metadata is present. The metadata is present if
+    /// `ImageLoader::metadata()` returns `Some`.
     #[inline(never)]
     pub fn set_data_provider(&mut self, data_provider: Box<DataProvider>) {
+        self.have_data_provider = true;
         self.predictor_thread_comm
             .sender
             .send(MainThreadToPredictorThreadMsg::SetDataProvider(data_provider))
             .unwrap()
     }
 
-    #[inline(never)]
-    pub fn extract_data(&mut self) {
-        self.predictor_thread_comm
-            .sender
-            .send(MainThreadToPredictorThreadMsg::ExtractData)
-            .unwrap()
-    }
-
+    /// Returns a reference to the image metadata, which contains image dimensions and color info.
     #[inline]
     pub fn metadata(&self) -> &Option<Metadata> {
         &self.metadata
@@ -500,10 +539,26 @@ trait FromFlateResult : Sized {
     fn from_flate_result(error: c_int) -> Result<(), Self>;
 }
 
+/// Describes the progress of loading the image. This is the value returned from
+/// `ImageLoader::add_data_result()`.
 #[derive(Copy, Clone, PartialEq)]
-pub enum AddDataResult {
+pub enum LoadProgress {
+    /// The image has been fully entropy decoded.
+    ///
+    /// Because the image prediction happens on a background thread, this result does not
+    /// necessarily mean that the image has been fully decoded. To wait until the image is truly
+    /// finished decoding, call `ImageLoader::wait_until_finished()` after receiving this result
+    /// from `ImageLoader::add_data()`.
     Finished,
-    Continue,
+
+    /// Data was successfully consumed, but the image has not been fully decoded yet. To continue
+    /// to decode the image, call `ImageLoader::add_data()` again with more data.
+    NeedMoreData,
+
+    /// Enough data was consumed to decode the image metadata, but no data provider has been set
+    /// up. Before calling `ImageLoader::add_data()` again to decode the image data proper, a data
+    /// provider must be installed via `ImageLoader::set_data_provider()`.
+    NeedDataProviderAndMoreData,
 }
 
 #[derive(Copy, Clone, PartialEq)]
@@ -536,17 +591,52 @@ fn aligned_scanline_buffer_offset(buffer: &[u8]) -> usize {
     }
 }
 
+/// An interface that `parng` uses to access storage for the image data. By implementing this
+/// trait, you can choose any method you wish to store the image data and it will be transparent to
+/// `parng`.
+///
+/// Be aware that the data provider will be called on a background thread; i.e. not the thread it
+/// was created on! You must ensure proper synchronization between the main thread and that
+/// background thread if you wish to communicate between them.
 pub trait DataProvider : Send {
-    /// `reference_scanline`, if present, will always be above `current_scanline`.
+    /// Called when `parng` needs to predict a scanline.
+    ///
+    /// `parng` requests one or two scanlines using this method: one for writing
+    /// (`current_scanline`) and, optionally, one for reading (`reference_scanline`). It is
+    /// guaranteed that the reference scanline will always have a smaller Y value than the current
+    /// scanline.
+    ///
+    /// `lod` specifies the level of detail, if the image is interlaced.
+    ///
+    /// `indexed` is true if the image has a color palette. If it is true, then the scanlines
+    /// returned should have 8 bits of storage per pixel. Otherwise, the data provider should
+    /// return scanlines with 32 bits of storage per pixel.
     fn fetch_scanlines_for_prediction<'a>(&'a mut self,
                                           reference_scanline: Option<u32>,
                                           current_scanline: u32,
                                           lod: LevelOfDetail,
                                           indexed: bool)
                                           -> ScanlinesForPrediction<'a>;
+
+    /// Called when `parng` has finished prediction for a scanline, optionally at a specific level
+    /// of detail.
+    ///
+    /// If the image is in RGBA or grayscale-alpha format, then the scanline is entirely finished
+    /// at this time. Otherwise, unless the image is in indexed format, the scanline is finished,
+    /// but the alpha values are not yet valid. Finally, if the image is in indexed format, the
+    /// scanline palette values are correct, but the indexed-to-truecolor conversion has not
+    /// occurred yet, so the scanline is not yet suitable for display.
+    fn prediction_complete_for_scanline(&mut self, scanline: u32, lod: LevelOfDetail);
+
+    /// Called when `parng` needs to perform RGBA conversion for a scanline.
+    ///
+    /// `lod` specifies the level of detail, if the image is interlaced.
+    ///
+    /// This method will be called only if the image is not RGBA.
     fn fetch_scanlines_for_rgba_conversion<'a>(&'a mut self, scanline: u32, lod: LevelOfDetail)
                                                -> ScanlinesForRgbaConversion<'a>;
-    fn extract_data(&mut self);
+    fn rgba_conversion_complete_for_scanline(&mut self, scanline: u32, lod: LevelOfDetail);
+    fn finished(&mut self);
 }
 
 pub struct ScanlinesForPrediction<'a> {

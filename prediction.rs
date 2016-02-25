@@ -22,10 +22,10 @@ static ADAM7_LEVELS_OF_DETAIL: [LevelOfDetail; 7] = [
 ];
 
 pub enum MainThreadToPredictorThreadMsg {
-    /// Sets a new `DataProvider`.
+    /// Sets a new data provider.
     SetDataProvider(Box<DataProvider>),
-    /// Tells the data provider to extract data.
-    ExtractData,
+    /// The image is finished entropy decoding.
+    Finished,
     Predict(PredictionRequest),
     PerformRgbaConversion(PerformRgbaConversionRequest),
 }
@@ -125,65 +125,70 @@ fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
                     } else {
                         Some(scanline_y - 1)
                     };
-                    let ScanlinesForPrediction {
-                        reference_scanline: mut prev,
-                        current_scanline: dest,
-                        stride,
-                    } = data_provider.fetch_scanlines_for_prediction(prev_scanline_y,
-                                                                     scanline_y,
-                                                                     scanline_lod,
-                                                                     indexed_color);
-                    let mut properly_aligned = true;
-                    let prev = match prev {
-                        Some(ref mut prev) => {
-                            if !slice_is_properly_aligned(prev) {
-                                properly_aligned = false;
+
+                    {
+                        let ScanlinesForPrediction {
+                            reference_scanline: mut prev,
+                            current_scanline: dest,
+                            stride,
+                        } = data_provider.fetch_scanlines_for_prediction(prev_scanline_y,
+                                                                         scanline_y,
+                                                                         scanline_lod,
+                                                                         indexed_color);
+                        let mut properly_aligned = true;
+                        let prev = match prev {
+                            Some(ref mut prev) => {
+                                if !slice_is_properly_aligned(prev) {
+                                    properly_aligned = false;
+                                }
+                                &mut prev[..]
                             }
-                            &mut prev[..]
+                            None => {
+                                blank.extend(iter::repeat(0).take(dest_width_in_bytes as usize));
+                                &mut blank[..]
+                            }
+                        };
+                        if !slice_is_properly_aligned(dest) {
+                            properly_aligned = false;
                         }
-                        None => {
-                            blank.extend(iter::repeat(0).take(dest_width_in_bytes as usize));
-                            &mut blank[..]
+
+                        if scanline_y == 0 {
+                            predictor = Predictor::None
                         }
-                    };
-                    if !slice_is_properly_aligned(dest) {
-                        properly_aligned = false;
-                    }
 
-                    if scanline_y == 0 {
-                        predictor = Predictor::None
-                    }
+                        if properly_aligned {
+                            predictor.accelerated_predict(&mut dest[..],
+                                                          &src[scanline_offset..],
+                                                          &prev[..],
+                                                          width,
+                                                          color_depth,
+                                                          stride)
+                        } else {
+                            predictor.predict(&mut dest[0..dest_width_in_bytes],
+                                              &src[scanline_offset..],
+                                              &prev[0..dest_width_in_bytes],
+                                              color_depth,
+                                              stride);
+                        }
 
-                    if properly_aligned {
-                        predictor.accelerated_predict(&mut dest[..],
-                                                      &src[scanline_offset..],
-                                                      &prev[..],
-                                                      width,
-                                                      color_depth,
-                                                      stride)
-                    } else {
-                        predictor.predict(&mut dest[0..dest_width_in_bytes],
-                                          &src[scanline_offset..],
-                                          &prev[0..dest_width_in_bytes],
-                                          color_depth,
-                                          stride);
-                    }
-
-                    if !indexed_color {
-                        convert_grayscale_to_rgba(&mut prev[0..dest_width_in_bytes],
-                                                  &palette,
-                                                  color_depth);
-                        if scanline_y == height - 1 {
-                            convert_grayscale_to_rgba(&mut dest[0..dest_width_in_bytes],
+                        if !indexed_color {
+                            convert_grayscale_to_rgba(&mut prev[0..dest_width_in_bytes],
                                                       &palette,
                                                       color_depth);
+                            if scanline_y == height - 1 {
+                                convert_grayscale_to_rgba(&mut dest[0..dest_width_in_bytes],
+                                                          &palette,
+                                                          color_depth);
+                            }
                         }
+
+                        sender.send(PredictorThreadToMainThreadMsg::ScanlinePredictionComplete(
+                                scanline_y,
+                                scanline_lod,
+                                src)).unwrap();
                     }
 
-                    sender.send(PredictorThreadToMainThreadMsg::ScanlinePredictionComplete(
-                            scanline_y,
-                            scanline_lod,
-                            src)).unwrap()
+                    data_provider.prediction_complete_for_scanline(scanline_y, scanline_lod);
                 }
             }
             MainThreadToPredictorThreadMsg::SetDataProvider(new_data_provider) => {
@@ -212,29 +217,34 @@ fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
 
                 for lod in levels_of_detail {
                     for scanline_y in 0..height {
-                        let ScanlinesForRgbaConversion {
-                            rgba_scanline: dest,
-                            indexed_scanline: src,
-                            rgba_stride: dest_stride,
-                            indexed_stride: src_stride,
-                        } = data_provider.fetch_scanlines_for_rgba_conversion(scanline_y, *lod);
-                        let dest_line_stride = (dest_stride as usize) * (width as usize);
-                        let src_line_stride = (src_stride as usize) * (width as usize);
-                        convert_indexed_to_rgba(&mut dest[0..dest_line_stride],
-                                                &src[0..src_line_stride],
-                                                &rgb_palette[..],
-                                                &transparency,
-                                                color_depth,
-                                                dest_stride,
-                                                src_stride);
+                        {
+                            let ScanlinesForRgbaConversion {
+                                rgba_scanline: dest,
+                                indexed_scanline: src,
+                                rgba_stride: dest_stride,
+                                indexed_stride: src_stride,
+                            } = data_provider.fetch_scanlines_for_rgba_conversion(scanline_y,
+                                                                                  *lod);
+                            let dest_line_stride = (dest_stride as usize) * (width as usize);
+                            let src_line_stride = (src_stride as usize) * (width as usize);
+                            convert_indexed_to_rgba(&mut dest[0..dest_line_stride],
+                                                    &src[0..src_line_stride],
+                                                    &rgb_palette[..],
+                                                    &transparency,
+                                                    color_depth,
+                                                    dest_stride,
+                                                    src_stride);
+                        }
+
+                        data_provider.rgba_conversion_complete_for_scanline(scanline_y, *lod);
                     }
                 }
 
                 sender.send(PredictorThreadToMainThreadMsg::RgbaConversionComplete).unwrap();
             }
-            MainThreadToPredictorThreadMsg::ExtractData => {
+            MainThreadToPredictorThreadMsg::Finished => {
                 if let Some(ref mut data_provider) = mem::replace(&mut data_provider, None) {
-                    data_provider.extract_data()
+                    data_provider.finished()
                 }
             }
         }

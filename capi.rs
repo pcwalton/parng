@@ -7,7 +7,7 @@
 #![allow(non_camel_case_types)]
 
 use PngError;
-use imageloader::{self, AddDataResult, DataProvider, ImageLoader, InterlacingInfo, LevelOfDetail};
+use imageloader::{self, DataProvider, ImageLoader, InterlacingInfo, LevelOfDetail, LoadProgress};
 use imageloader::{ScanlinesForPrediction, ScanlinesForRgbaConversion};
 use libc::{c_void, size_t, uintptr_t};
 use metadata::{ColorType, InterlaceMethod, Metadata};
@@ -16,7 +16,7 @@ use std::mem;
 use std::ptr;
 use std::slice;
 
-pub type parng_add_data_result = u32;
+pub type parng_load_progress = u32;
 pub type parng_color_type = u32;
 pub type parng_compression_method = u32;
 pub type parng_error = u32;
@@ -27,8 +27,9 @@ pub type parng_io_error = u32;
 pub type parng_level_of_detail = i32;
 pub type parng_seek_from = u32;
 
-pub const PARNG_ADD_DATA_RESULT_FINISHED: u32 = 0;
-pub const PARNG_ADD_DATA_RESULT_CONTINUE: u32 = 1;
+pub const PARNG_LOAD_PROGRESS_FINISHED: u32 = 0;
+pub const PARNG_LOAD_PROGRESS_NEED_MORE_DATA: u32 = 1;
+pub const PARNG_LOAD_PROGRESS_NEED_DATA_PROVIDER_AND_MORE_DATA: u32 = 2;
 
 pub const PARNG_COLOR_TYPE_GRAYSCALE: u32 = 0;
 pub const PARNG_COLOR_TYPE_RGB: u32 = 2;
@@ -43,8 +44,7 @@ pub const PARNG_ERROR_IO: u32 = 1;
 pub const PARNG_ERROR_INVALID_METADATA: u32 = 2;
 pub const PARNG_ERROR_INVALID_SCANLINE_PREDICTOR: u32 = 3;
 pub const PARNG_ERROR_ENTROPY_DECODING_ERROR: u32 = 4;
-pub const PARNG_ERROR_NO_METADATA: u32 = 5;
-pub const PARNG_ERROR_NO_DATA_PROVIDER: u32 = 6;
+pub const PARNG_ERROR_NO_DATA_PROVIDER: u32 = 5;
 
 pub const PARNG_FILTER_METHOD_ADAPTIVE: u32 = 0;
 
@@ -148,12 +148,18 @@ pub struct parng_data_provider {
                                                   indexed: i32,
                                                   scanlines: *mut parng_scanlines_for_prediction,
                                                   user_data: *mut c_void),
+    prediction_complete_for_scanline: extern "C" fn(scanline: u32,
+                                                    lod: parng_level_of_detail,
+                                                    user_data: *mut c_void),
     fetch_scanlines_for_rgba_conversion:
         extern "C" fn(scanline: u32,
                       lod: parng_level_of_detail,
                       scanlines: *mut parng_scanlines_for_rgba_conversion,
                       user_data: *mut c_void),
-    extract_data: extern "C" fn(user_data: *mut c_void),
+    rgba_conversion_complete_for_scanline: extern "C" fn(scanline: u32,
+                                                         lod: parng_level_of_detail,
+                                                         user_data: *mut c_void),
+    finished: extern "C" fn(user_data: *mut c_void),
     user_data: *mut c_void,
 }
 
@@ -194,6 +200,11 @@ impl DataProvider for parng_data_provider {
         }
     }
 
+    fn prediction_complete_for_scanline(&mut self, scanline: u32, lod: LevelOfDetail) {
+        let c_lod = level_of_detail_to_c_level_of_detail(lod);
+        (self.prediction_complete_for_scanline)(scanline, c_lod, self.user_data);
+    }
+
     fn fetch_scanlines_for_rgba_conversion<'a>(&'a mut self, scanline: u32, lod: LevelOfDetail)
                                                -> ScanlinesForRgbaConversion<'a> {
        unsafe {
@@ -215,8 +226,13 @@ impl DataProvider for parng_data_provider {
        }
     }
 
-    fn extract_data(&mut self) {
-        (self.extract_data)(self.user_data)
+    fn rgba_conversion_complete_for_scanline(&mut self, scanline: u32, lod: LevelOfDetail) {
+        let c_lod = level_of_detail_to_c_level_of_detail(lod);
+        (self.rgba_conversion_complete_for_scanline)(scanline, c_lod, self.user_data);
+    }
+
+    fn finished(&mut self) {
+        (self.finished)(self.user_data)
     }
 }
 
@@ -238,16 +254,10 @@ pub struct parng_interlacing_info {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn parng_image_loader_create(image_loader: *mut *mut parng_image_loader)
-                                                   -> parng_error {
-    match ImageLoader::new() {
-        Ok(new_image_loader) => {
-            *image_loader = mem::transmute::<Box<ImageLoader>,
-                                             *mut ImageLoader>(Box::new(new_image_loader));
-            PARNG_SUCCESS
-        }
-        Err(err) => png_error_to_c_error(err)
-    }
+pub unsafe extern "C" fn parng_image_loader_create(image_loader: *mut *mut parng_image_loader) {
+    let new_image_loader = ImageLoader::new();
+    *image_loader = mem::transmute::<Box<ImageLoader>,
+                                     *mut ImageLoader>(Box::new(new_image_loader));
 }
 
 #[no_mangle]
@@ -258,11 +268,11 @@ pub unsafe extern "C" fn parng_image_loader_destroy(image_loader: *mut parng_ima
 #[no_mangle]
 pub unsafe extern "C" fn parng_image_loader_add_data(image_loader: *mut parng_image_loader,
                                                      reader: *mut parng_reader,
-                                                     result: *mut parng_add_data_result)
+                                                     result: *mut parng_load_progress)
                                                      -> parng_error {
     match (*image_loader).add_data(&mut *reader) {
-        Ok(add_data_result) => {
-            *result = add_data_result_to_c_result(add_data_result);
+        Ok(load_progress) => {
+            *result = load_progress_to_c_result(load_progress);
             PARNG_SUCCESS
         }
         Err(err) => png_error_to_c_error(err)
@@ -285,11 +295,6 @@ pub unsafe extern "C" fn parng_image_loader_set_data_provider(
         image_loader: *mut parng_image_loader,
         data_provider: *mut parng_data_provider) {
     (*image_loader).set_data_provider(Box::new(*data_provider))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn parng_image_loader_extract_data(image_loader: *mut parng_image_loader) {
-    (*image_loader).extract_data()
 }
 
 #[no_mangle]
@@ -328,15 +333,17 @@ fn png_error_to_c_error(err: PngError) -> parng_error {
         PngError::InvalidMetadata(_) => PARNG_ERROR_INVALID_METADATA,
         PngError::InvalidScanlinePredictor(_) => PARNG_ERROR_INVALID_SCANLINE_PREDICTOR,
         PngError::EntropyDecodingError => PARNG_ERROR_ENTROPY_DECODING_ERROR,
-        PngError::NoMetadata => PARNG_ERROR_INVALID_METADATA,
         PngError::NoDataProvider => PARNG_ERROR_NO_DATA_PROVIDER,
     }
 }
 
-fn add_data_result_to_c_result(result: AddDataResult) -> parng_add_data_result {
+fn load_progress_to_c_result(result: LoadProgress) -> parng_load_progress {
     match result {
-        AddDataResult::Finished => PARNG_ADD_DATA_RESULT_FINISHED,
-        AddDataResult::Continue => PARNG_ADD_DATA_RESULT_CONTINUE,
+        LoadProgress::Finished => PARNG_LOAD_PROGRESS_FINISHED,
+        LoadProgress::NeedMoreData => PARNG_LOAD_PROGRESS_NEED_MORE_DATA,
+        LoadProgress::NeedDataProviderAndMoreData => {
+            PARNG_LOAD_PROGRESS_NEED_DATA_PROVIDER_AND_MORE_DATA
+        }
     }
 }
 

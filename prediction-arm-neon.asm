@@ -63,6 +63,12 @@
     ldmfd sp!,{r4-r6,pc}
 .endm
 
+@ We factor out this safe pattern for the benefit of the static analysis, which would interpret
+@ `[0]` as an unsafe memory access.
+.macro move_neon_byte_to_register dest,src
+    vmov.u8 \dest,\src[0]
+.endm
+
 @ #begin-safe-code
 
 @ load_8bpp_to_32bpp_table_lookup_mask(r32 dest_hi, r32 dest_lo)
@@ -523,7 +529,7 @@ parng_predict_scanline_paeth_strided_24bpp:
     loop_start
     vld1.32 {d1},[prev]         @ d1 = prev (8-bit)
     predict_pixels_paeth        @ d0 = result
-    vmov.u8 r7,d0
+    move_neon_byte_to_register r7,d0
     orr r7,r7,#0xff000000
     str r7,[dest]               @ write result
     loop_end_stride 3

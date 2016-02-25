@@ -26,6 +26,7 @@ def check(allowed_directives: nil,
           allowed_memory_locations: nil,
           allowed_operands: nil,
           allowed_macro_arguments: nil,
+          allowed_macros: nil,
           allowed_data_types: nil,
           directive_sigil: nil,
           comment_sigil: nil,
@@ -43,7 +44,7 @@ def check(allowed_directives: nil,
         break if line.include? "#begin-safe-code"
     end
 
-    macro_names = Set.new
+    macro_names = allowed_macros
     critical_macro_stage = CRITICAL_MACROS.length
     file.each_line do |line|
         line = line.sub(/#{comment_sigil}.*/, '')
@@ -144,6 +145,7 @@ when 'arm'
                                     %w(q0 q1 q2 q3)),
           allowed_macro_arguments: Set.new(%w(dest_lo dest_hi)),
           allowed_data_types: Set.new(%w(8 16 32 64 i32 u8 u16 s16)),
+          allowed_macros: Set.new(%w(move_neon_byte_to_register)),
           directive_sigil: '.',
           comment_sigil: '@',
           macro_argument_sigil: '\\',
@@ -159,6 +161,7 @@ when 'x86_64'
                                     %w(xmm9 xmm10 xmm11 xmm12 xmm13 xmm14 xmm15)),
           allowed_data_types: Set.new(),
           allowed_macro_arguments: Set.new(%w(0 1 2 3)),
+          allowed_macros: Set.new(),
           directive_sigil: '%',
           comment_sigil: ';',
           macro_argument_sigil: '%',

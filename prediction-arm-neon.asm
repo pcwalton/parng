@@ -183,7 +183,7 @@ parng_predict_scanline_none_packed_8bpp:
     prolog
     load_8bpp_to_32bpp_table_lookup_mask s3,s2
     loop_start
-    vld1.16 {d0[]},[src]
+    vld1.16 {d0},[src]
     vtbl.8 d0,{d1},d0
     vst1.32 {d0},[dest]
     loop_end 8,2
@@ -523,7 +523,7 @@ parng_predict_scanline_paeth_strided_24bpp:
     loop_start
     vld1.32 {d1},[prev]         @ d1 = prev (8-bit)
     predict_pixels_paeth        @ d0 = result
-    vmov.u8 r7,d0[0]
+    vmov.u8 r7,d0
     orr r7,r7,#0xff000000
     str r7,[dest]               @ write result
     loop_end_stride 3

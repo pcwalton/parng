@@ -21,9 +21,9 @@ pub struct Dimensions {
     pub height: u32,
 }
 
-/// Color type used in an image.
+/// The color type used in an image.
 ///
-/// These color types directly corresponds to those defined in PNG spec.
+/// These color types directly correspond to the color types defined in the PNG specification.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum ColorType {
     Grayscale,
@@ -78,7 +78,7 @@ fn compute_color_depth(bit_depth: u8, color_type: u8) -> Option<u8> {
     }
 }
 
-/// Compression method used in an image.
+/// The compression method used in the image.
 ///
 /// PNG spec currently defines only one compression method:
 ///
@@ -98,9 +98,9 @@ impl CompressionMethod {
     }
 }
 
-/// Filtering method used in an image.
+/// The filtering (prediction) method used in the image.
 ///
-/// PNG spec currently defines only one filter method:
+/// The PNG specification currently defines only one filter method:
 ///
 /// > At present, only filter method 0 (adaptive filtering with five basic filter types) is
 /// defined.
@@ -118,9 +118,9 @@ impl FilterMethod {
     }
 }
 
-/// Interlace method used in an image.
+/// The interlacing method used in the image.
 ///
-/// PNG spec says that interlacing can be disabled or Adam7 interlace method can be used.
+/// The PNG specification allows either no interlacing or Adam7 interlacing.
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum InterlaceMethod {
     Disabled,
@@ -155,7 +155,7 @@ impl ChunkHeader {
     }
 }
 
-/// Represents metadata of a PNG image.
+/// Metadata found in the PNG header (dimensions, bit depth, etc.)
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct Metadata {
     /// Width and height.
@@ -166,7 +166,7 @@ pub struct Metadata {
     pub color_depth: u8,
     /// Compression method used in the image.
     pub compression_method: CompressionMethod,
-    /// Preprocessing method used in the image.
+    /// Prediction method used in the image.
     pub filter_method: FilterMethod,
     /// Transmission order used in the image.
     pub interlace_method: InterlaceMethod

@@ -77,14 +77,15 @@ impl ImageLoader {
 
     /// Decodes image data from the given stream.
     ///
-    /// Repeated calls to this method will decode an image.
+    /// This method decodes an arbitrary amount of data, so repeated calls to it are necessary to
+    /// decode the entire image.
     ///
     /// If the metadata has been read (which is checkable ether via `ImageLoader::metadata()` or by
-    /// looking for an `LoadProgress::NeedDataProviderAndMoreData` result), a data provider must
+    /// looking for a `LoadProgress::NeedDataProviderAndMoreData` result), a data provider must
     /// have be attached to this image loader via `ImageLoader::set_data_provider()` before calling
     /// this method, or this function will fail with a `PngError::NoDataProvider` error.
     ///
-    /// Returns an `LoadProgress` value that describes the progress of loading the image.
+    /// Returns a `LoadProgress` value that describes the progress of loading the image.
     #[inline(never)]
     pub fn add_data<R>(&mut self, reader: &mut R) -> Result<LoadProgress,PngError>
                        where R: Read + Seek {
@@ -473,8 +474,8 @@ impl ImageLoader {
     ///
     /// Because `parng` uses a background thread to perform image prediction and color conversion,
     /// the image may not be fully decoded even when `ImageLoader::add_data()` returns
-    /// `LoadProgress::Finished`. Most applications will therefore want to call this function upon
-    /// receiving `LoadProgress::Finished` from `ImageLoader::add_data()`.
+    /// `LoadProgress::Finished`. Most applications will therefore want to call this function after
+    /// receiving that result.
     #[inline(never)]
     pub fn wait_until_finished(&mut self) -> Result<(),PngError> {
         while !self.finished_decoding_altogether() {
@@ -518,6 +519,7 @@ impl ImageLoader {
     }
 
     /// Returns a reference to the image metadata, which contains image dimensions and color info.
+    /// If the metadata has not been loaded yet, returns `None`.
     #[inline]
     pub fn metadata(&self) -> &Option<Metadata> {
         &self.metadata
@@ -540,7 +542,7 @@ trait FromFlateResult : Sized {
 }
 
 /// Describes the progress of loading the image. This is the value returned from
-/// `ImageLoader::add_data_result()`.
+/// `ImageLoader::add_data()`.
 #[derive(Copy, Clone, PartialEq)]
 pub enum LoadProgress {
     /// The image has been fully entropy decoded.
@@ -672,13 +674,22 @@ pub struct ScanlinesForPrediction<'a> {
 /// requests.
 pub struct ScanlinesForRgbaConversion<'a> {
     /// The pixels of the RGBA scanline. There must be 4 bytes per pixel available in this array.
+    ///
+    /// It is recommended that the address of this slice be aligned properly. To determine the
+    /// optimum alignment, use the `align()` function.
     pub rgba_scanline: &'a mut [u8],
+
     /// The pixels of the indexed scanline. There must be 1 byte per pixel available in this array.
+    ///
+    /// It is recommended that the address of this slice be aligned properly. To determine the
+    /// optimum alignment, use the `align()` function.
     pub indexed_scanline: &'a [u8],
+
     /// The number of bytes between individiual pixels in `rgba_scanline`. This must be at least 4.
     ///
     /// This field is useful for in-place deinterlacing.
     pub rgba_stride: u8,
+
     /// The number of bytes between individiual pixels in `indexed_scanline`.
     ///
     /// This field is useful for in-place deinterlacing.
@@ -699,8 +710,14 @@ impl UninitializedExtension for Vec<u8> {
     }
 }
 
-pub fn align(address: usize) -> usize {
-    let remainder = address % 16;
+/// Rounds the given stride in bytes up to the value that provides the best performance.
+///
+/// The stride is the distance between scanlines in bytes.
+///
+/// It is recommended that data providers use this function to determine the stride when allocating
+/// space internally, so as to allow `parng` the most opportunities for use of accelerated SIMD.
+pub fn align(stride: usize) -> usize {
+    let remainder = stride % 16;
     if remainder == 0 {
         address
     } else {

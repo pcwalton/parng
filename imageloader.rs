@@ -719,9 +719,9 @@ impl UninitializedExtension for Vec<u8> {
 pub fn align(stride: usize) -> usize {
     let remainder = stride % 16;
     if remainder == 0 {
-        address
+        stride
     } else {
-        address + 16 - remainder
+        stride + 16 - remainder
     }
 }
 

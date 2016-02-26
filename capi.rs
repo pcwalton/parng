@@ -9,22 +9,33 @@
 use PngError;
 use imageloader::{self, DataProvider, ImageLoader, InterlacingInfo, LevelOfDetail, LoadProgress};
 use imageloader::{ScanlinesForPrediction, ScanlinesForRgbaConversion};
-use libc::{c_void, size_t, uintptr_t};
+use libc::{self, FILE, SEEK_CUR, SEEK_END, SEEK_SET, c_void, size_t, uintptr_t};
 use metadata::{ColorType, InterlaceMethod, Metadata};
-use std::io::{self, Error, ErrorKind, Read, Seek, SeekFrom};
+use simple::Image;
+use std::io::{self, Cursor, Error, ErrorKind, Read, Seek, SeekFrom};
 use std::mem;
 use std::ptr;
 use std::slice;
 
-pub type parng_load_progress = u32;
+/// See `metadata::ColorType`.
 pub type parng_color_type = u32;
+/// See `metadata::CompressionMethod`.
 pub type parng_compression_method = u32;
+/// See `PngError`.
 pub type parng_error = u32;
+/// See `metadata::FilterMethod`.
 pub type parng_filter_method = u32;
+/// See `imageloader::ImageLoader`.
 pub type parng_image_loader = ImageLoader;
+/// See `metadata::InterlaceMethod`.
 pub type parng_interlace_method = u32;
+/// See `std::io::Error`.
 pub type parng_io_error = u32;
+/// See `imageloader::LevelOfDetail`.
 pub type parng_level_of_detail = i32;
+/// See `imageloader::LoadProgress`.
+pub type parng_load_progress = u32;
+/// See `std::io::SeekFrom`.
 pub type parng_seek_from = u32;
 
 pub const PARNG_LOAD_PROGRESS_FINISHED: u32 = 0;
@@ -118,6 +129,43 @@ impl Seek for parng_reader {
     }
 }
 
+struct FileReader {
+    file: *mut FILE,
+}
+
+impl Read for FileReader {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        unsafe {
+            let nread = libc::fread(buffer.as_mut_ptr() as *mut c_void,
+                                    1,
+                                    buffer.len(),
+                                    self.file);
+            if nread > 0 {
+                return Ok(nread)
+            }
+            if libc::ferror(self.file) == 0 {
+                Ok(0)
+            } else {
+                Err(Error::last_os_error())
+            }
+        }
+    }
+}
+
+impl Seek for FileReader {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        let (offset, whence) = match pos {
+            SeekFrom::Start(offset) => (offset as i64, SEEK_SET),
+            SeekFrom::End(offset) => (offset as i64, SEEK_END),
+            SeekFrom::Current(offset) => (offset as i64, SEEK_CUR),
+        };
+        unsafe {
+            let new_offset = libc::fseek(self.file, offset, whence);
+            Ok(new_offset as u64)
+        }
+    }
+}
+
 #[repr(C)]
 pub struct parng_scanlines_for_prediction {
     pub reference_scanline: *mut u8,
@@ -135,6 +183,17 @@ pub struct parng_scanlines_for_rgba_conversion {
     pub indexed_scanline_length: size_t,
     pub rgba_stride: u8,
     pub indexed_stride: u8,
+}
+
+/// The fields of this structure are intentionally private so that the rest of `parng` can't
+/// violate memory safety.
+#[repr(C)]
+pub struct parng_image {
+    width: u32,
+    height: u32,
+    stride: size_t,
+    capacity: size_t,
+    pixels: *mut u8,
 }
 
 /// The fields of this structure are intentionally private so that the rest of `parng` can't
@@ -251,6 +310,54 @@ pub struct parng_interlacing_info {
     pub y: u32,
     pub stride: u8,
     pub offset: u8,
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn parng_image_load(c_image: *mut parng_image, reader: *mut parng_reader)
+                                          -> parng_error {
+    match Image::load(&mut *reader) {
+        Err(error) => png_error_to_c_error(error),
+        Ok(image) => {
+            *c_image = image_to_c_image(image);
+            PARNG_SUCCESS
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn parng_image_load_from_file(c_image: *mut parng_image, file: *mut FILE)
+                                                    -> parng_error {
+    let mut file_reader = FileReader {
+        file: file,
+    };
+    match Image::load(&mut file_reader) {
+        Err(error) => png_error_to_c_error(error),
+        Ok(image) => {
+            *c_image = image_to_c_image(image);
+            PARNG_SUCCESS
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn parng_image_load_from_memory(c_image: *mut parng_image,
+                                                      bytes: *const u8,
+                                                      length: size_t)
+                                                      -> parng_error {
+    match Image::load(&mut Cursor::new(slice::from_raw_parts(bytes, length))) {
+        Err(error) => png_error_to_c_error(error),
+        Ok(image) => {
+            *c_image = image_to_c_image(image);
+            PARNG_SUCCESS
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn parng_image_destroy(image: *mut parng_image) {
+    drop(Vec::from_raw_parts((*image).pixels,
+                             (*image).stride * (*image).height as usize,
+                             (*image).capacity))
 }
 
 #[no_mangle]
@@ -424,5 +531,18 @@ fn interlace_method_to_c_interlace_method(interlace_method: InterlaceMethod)
         InterlaceMethod::Disabled => PARNG_INTERLACE_METHOD_NONE,
         InterlaceMethod::Adam7 => PARNG_INTERLACE_METHOD_ADAM7,
     }
+}
+
+unsafe fn image_to_c_image(mut image: Image) -> parng_image {
+    assert!(image.stride * image.height as usize == image.pixels.len());
+    let c_image = parng_image {
+        width: image.width,
+        height: image.height,
+        stride: image.stride,
+        capacity: image.pixels.capacity(),
+        pixels: image.pixels.as_mut_ptr(),
+    };
+    mem::forget(image.pixels);
+    c_image
 }
 

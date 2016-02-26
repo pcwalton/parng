@@ -65,11 +65,12 @@ static parng_io_error seek_in_file(int64_t position,
 static void fetch_scanlines_for_prediction(int32_t reference_scanline,
                                            uint32_t current_scanline,
                                            parng_level_of_detail lod,
+                                           int32_t indexed,
                                            parng_scanlines_for_prediction *scanlines,
                                            void *user_data) {
     struct decoded_image *decoded_image = (struct decoded_image *)user_data;
-    assert(reference_scanline <= (int32_t)decoded_image->height);
-    assert(current_scanline <= decoded_image->height);
+    assert(reference_scanline < (int32_t)decoded_image->height);
+    assert(current_scanline < decoded_image->height);
 
     parng_interlacing_info reference_interlacing_info;
     if (reference_scanline >= 0) {
@@ -81,7 +82,17 @@ static void fetch_scanlines_for_prediction(int32_t reference_scanline,
     parng_interlacing_info current_interlacing_info;
     parng_interlacing_info_init(&current_interlacing_info, current_scanline, OUTPUT_BPP * 8, lod);
 
-    uintptr_t aligned_stride = parng_image_loader_align(decoded_image->width * 4);
+    uint8_t pixel_stride, *pixels;
+    if (indexed) {
+        pixel_stride = 1;
+        pixels = decoded_image->indexed_pixels;
+    } else {
+        pixel_stride = 4;
+        pixels = decoded_image->rgba_pixels;
+    }
+
+    uintptr_t aligned_stride =
+        parng_image_loader_align(decoded_image->width * (uint32_t)pixel_stride);
     if (reference_scanline >= 0) {
         uintptr_t start = reference_interlacing_info.y * aligned_stride +
             reference_interlacing_info.offset;
@@ -91,11 +102,15 @@ static void fetch_scanlines_for_prediction(int32_t reference_scanline,
 
     uintptr_t start = current_interlacing_info.y * aligned_stride +
         current_interlacing_info.offset;
-    scanlines->current_scanline = &decoded_image->pixels[start];
+    scanlines->current_scanline = &decoded_image->rgba_pixels[start];
     scanlines->current_scanline_length = aligned_stride;
 
     scanlines->stride = current_interlacing_info.stride;
 }
+
+static void prediction_complete_for_scanline(uint32_t scanline,
+                                             parng_level_of_detail lod,
+                                             void *user_data) {}
 
 static void fetch_scanlines_for_rgba_conversion(uint32_t scanline,
                                                 parng_level_of_detail lod,
@@ -108,14 +123,26 @@ static void fetch_scanlines_for_rgba_conversion(uint32_t scanline,
     parng_interlacing_info_init(&rgba_interlacing_info, scanline, OUTPUT_BPP * 8, lod);
     parng_interlacing_info_init(&indexed_interlacing_info, scanline, 1 * 8, lod);
     
-    uintptr_t aligned_stride = parng_image_loader_align(decoded_image->width * 4);
-    scanlines->rgba_scanline = &decoded_image->rgba_pixels;
-    scanlines->indexed_scanline = &decoded_image->indexed_pixels;
-    scanlines->rgba_scanline_length = scanlines->indexed_scanline_length = aligned_stride;
-    scanlines->rgba_stride = scanlines->indexed_stride = current_interlacing_info.stride;
+    uintptr_t aligned_rgba_stride = parng_image_loader_align(decoded_image->width * 4);
+    uintptr_t rgba_start = rgba_interlacing_info.y * aligned_rgba_stride +
+        rgba_interlacing_info.offset;
+    scanlines->rgba_scanline = &decoded_image->rgba_pixels[rgba_start];
+
+    uintptr_t aligned_indexed_stride = parng_image_loader_align(decoded_image->width);
+    uintptr_t indexed_start = indexed_interlacing_info.y * aligned_indexed_stride +
+        indexed_interlacing_info.offset;
+    scanlines->indexed_scanline = &decoded_image->indexed_pixels[indexed_start];
+    scanlines->rgba_scanline_length = aligned_rgba_stride;
+    scanlines->indexed_scanline_length = aligned_indexed_stride;
+    scanlines->rgba_stride = rgba_interlacing_info.stride;
+    scanlines->indexed_stride = indexed_interlacing_info.stride;
 }
 
-void extract_data(void *user_data) {
+static void rgba_conversion_complete_for_scanline(uint32_t scanline,
+                                                  parng_level_of_detail lod,
+                                                  void *user_data) {}
+
+void finished(void *user_data) {
     struct decoded_image *decoded_image = (struct decoded_image *)user_data;
     pthread_mutex_lock(&decoded_image->finished_mutex);
     decoded_image->finished = true;
@@ -137,25 +164,33 @@ int main(int argc, const char **argv) {
 
     parng_error err;
     parng_image_loader *image_loader;
-    if ((err = parng_image_loader_create(&image_loader)) != PARNG_SUCCESS)
-        die(err);
+    parng_image_loader_create(&image_loader);
     parng_reader reader = { read_from_file, seek_in_file, in_file };
 
     parng_metadata metadata;
-    parng_add_data_result add_data_result;
+    parng_load_progress load_progress;
     do {
-        err = parng_image_loader_add_data(image_loader, &reader, &add_data_result);
+        err = parng_image_loader_add_data(image_loader, &reader, &load_progress);
         if (err != PARNG_SUCCESS)
             die(err);
-        assert(add_data_result == PARNG_ADD_DATA_RESULT_CONTINUE);
-    } while (!parng_image_loader_get_metadata(image_loader, &metadata));
+    } while (load_progress == PARNG_LOAD_PROGRESS_NEED_MORE_DATA);
 
-    uintptr_t aligned_stride = parng_image_loader_align(metadata.width * 4);
-    uint8_t *buffer = malloc(aligned_stride * metadata.height);
-    if (buffer == NULL) {
-        fprintf(stderr, "Failed to allocate space for the pixels!\n");
+    assert(parng_image_loader_get_metadata(image_loader, &metadata));
+
+    uintptr_t aligned_rgba_stride = parng_image_loader_align(metadata.width * 4);
+    uint8_t *rgba_pixels = malloc(aligned_rgba_stride * metadata.height);
+    if (rgba_pixels == NULL) {
+        fprintf(stderr, "Failed to allocate space for the RGBA pixels!\n");
         exit(1);
     }
+
+    uintptr_t aligned_indexed_stride = parng_image_loader_align(metadata.width);
+    uint8_t *indexed_pixels = malloc(aligned_indexed_stride * metadata.height);
+    if (indexed_pixels == NULL) {
+        fprintf(stderr, "Failed to allocate space for the indexed pixels!\n");
+        exit(1);
+    }
+
     pthread_mutex_t finished_mutex;
     if (pthread_mutex_init(&finished_mutex, NULL) != 0) {
         perror(NULL);
@@ -169,20 +204,27 @@ int main(int argc, const char **argv) {
     struct decoded_image decoded_image = {
         metadata.width,
         metadata.height,
-        buffer,
+        rgba_pixels,
+        indexed_pixels,
         false,
         finished_mutex,
         finished_cond
     };
 
-    struct parng_data_provider data_provider = { get_scanline_data, extract_data, &decoded_image };
+    struct parng_data_provider data_provider = {
+        fetch_scanlines_for_prediction,
+        prediction_complete_for_scanline,
+        fetch_scanlines_for_rgba_conversion,
+        rgba_conversion_complete_for_scanline,
+        finished,
+        &decoded_image
+    };
     parng_image_loader_set_data_provider(image_loader, &data_provider);
 
     do {
-        parng_image_loader_add_data(image_loader, &reader, &add_data_result);
-    } while (add_data_result == PARNG_ADD_DATA_RESULT_CONTINUE);
+        parng_image_loader_add_data(image_loader, &reader, &load_progress);
+    } while (load_progress == PARNG_LOAD_PROGRESS_NEED_MORE_DATA);
     parng_image_loader_wait_until_finished(image_loader);
-    parng_image_loader_extract_data(image_loader);
 
     pthread_mutex_lock(&decoded_image.finished_mutex);
     while (!decoded_image.finished)
@@ -212,11 +254,11 @@ int main(int argc, const char **argv) {
     for (uint32_t row = 0; row < metadata.height; row++) {
         uint32_t y = metadata.height - row - 1;
         for (uint32_t x = 0; x < metadata.width; x++) {
-            size_t start = aligned_stride * y + x * OUTPUT_BPP;
+            size_t start = aligned_rgba_stride * y + x * OUTPUT_BPP;
             uint8_t pixel_data[3] = {
-                decoded_image.pixels[start + 2],
-                decoded_image.pixels[start + 1],
-                decoded_image.pixels[start + 0]
+                decoded_image.rgba_pixels[start + 2],
+                decoded_image.rgba_pixels[start + 1],
+                decoded_image.rgba_pixels[start + 0]
             };
             if (fwrite(pixel_data, 3, 1, out_file) < 1) {
                 perror("Failed to write decoded pixels");

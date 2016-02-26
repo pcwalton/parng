@@ -152,10 +152,6 @@ fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
                             properly_aligned = false;
                         }
 
-                        if scanline_y == 0 {
-                            predictor = Predictor::None
-                        }
-
                         if properly_aligned {
                             predictor.accelerated_predict(&mut dest[..],
                                                           &src[scanline_offset..],

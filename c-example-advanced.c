@@ -114,14 +114,14 @@ static void prediction_complete_for_scanline(uint32_t scanline,
 
 static void fetch_scanlines_for_rgba_conversion(uint32_t scanline,
                                                 parng_level_of_detail lod,
+												int32_t indexed,
                                                 parng_scanlines_for_rgba_conversion *scanlines,
                                                 void *user_data) {
     struct decoded_image *decoded_image = (struct decoded_image *)user_data;
     assert(scanline <= (int32_t)decoded_image->height);
 
-    parng_interlacing_info rgba_interlacing_info, indexed_interlacing_info;
+    parng_interlacing_info rgba_interlacing_info;
     parng_interlacing_info_init(&rgba_interlacing_info, scanline, OUTPUT_BPP * 8, lod);
-    parng_interlacing_info_init(&indexed_interlacing_info, scanline, 1 * 8, lod);
     
     uintptr_t aligned_rgba_stride = parng_image_loader_align(decoded_image->width * 4);
     uintptr_t rgba_start = rgba_interlacing_info.y * aligned_rgba_stride +
@@ -129,13 +129,20 @@ static void fetch_scanlines_for_rgba_conversion(uint32_t scanline,
     scanlines->rgba_scanline = &decoded_image->rgba_pixels[rgba_start];
 
     uintptr_t aligned_indexed_stride = parng_image_loader_align(decoded_image->width);
-    uintptr_t indexed_start = indexed_interlacing_info.y * aligned_indexed_stride +
-        indexed_interlacing_info.offset;
-    scanlines->indexed_scanline = &decoded_image->indexed_pixels[indexed_start];
     scanlines->rgba_scanline_length = aligned_rgba_stride;
-    scanlines->indexed_scanline_length = aligned_indexed_stride;
     scanlines->rgba_stride = rgba_interlacing_info.stride;
-    scanlines->indexed_stride = indexed_interlacing_info.stride;
+
+	if (indexed) {
+		parng_interlacing_info indexed_interlacing_info;
+		parng_interlacing_info_init(&indexed_interlacing_info, scanline, 1 * 8, lod);
+		uintptr_t indexed_start = indexed_interlacing_info.y * aligned_indexed_stride +
+			indexed_interlacing_info.offset;
+		scanlines->indexed_scanline = &decoded_image->indexed_pixels[indexed_start];
+		scanlines->indexed_scanline_length = aligned_indexed_stride;
+		scanlines->indexed_stride = indexed_interlacing_info.stride;
+	} else {
+		scanlines->indexed_scanline = NULL;
+	}
 }
 
 static void rgba_conversion_complete_for_scanline(uint32_t scanline,

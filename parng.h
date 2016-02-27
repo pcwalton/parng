@@ -225,9 +225,10 @@ struct parng_scanlines_for_rgba_conversion {
     // The number of valid bytes that `rgba_scanline` points to.
     size_t rgba_scanline_length;
 
-    // The pixels of the indexed scanline.
+    // The pixels of the indexed scanline, if applicable.
     //
-    // The pixels of the indexed scanline. There must be 1 byte per pixel available in this array.
+    // The pixels of the indexed scanline, if applicable. If the image is not indexed, this should
+    // be `NULL`. There must be 1 byte per pixel available in this array, if present.
     //
     // It is recommended that the address of this buffer be aligned properly. To determine the
     // optimum alignment, use the `parng_image_loader_align()` function.
@@ -236,16 +237,17 @@ struct parng_scanlines_for_rgba_conversion {
     // The number of valid bytes that `indexed_scanline_length` points to.
     size_t indexed_scanline_length;
 
-    // The number of bytes between individiual pixels in `rgba_scanline`.
+    // The number of bytes between individual pixels in `rgba_scanline`.
     //
-    // The number of bytes between individiual pixels in `rgba_scanline`. This must be at least 4.
+    // The number of bytes between individual pixels in `rgba_scanline`. This must be at least 4.
     //
     // This field is useful for in-place deinterlacing.
     uint8_t rgba_stride;
 
-    // The number of bytes between individiual pixels in `indexed_scanline`.
+    // The number of bytes between individual pixels in `indexed_scanline`.
     //
-    // The number of bytes between individiual pixels in `indexed_scanline`.
+    // The number of bytes between individual pixels in `indexed_scanline`. If the image is not
+    // indexed, this field is ignored.
     //
     // This field is useful for in-place deinterlacing.
     uint8_t indexed_stride;
@@ -304,11 +306,13 @@ struct parng_data_provider {
     //
     // Called when `parng` needs to perform RGBA conversion for a scanline, optionally at a
     // specific level of detail. `lod` specifies the level of detail, if the image is interlaced.
-    // `user_data` is the contents of the data provider's `user_data` field.
+    // `indexed` will have a nonzero value if the image is indexed. `user_data` is the contents of
+    // the data provider's `user_data` field.
     //
     // This method will be called only if the image is not RGBA.
     void (*fetch_scanlines_for_rgba_conversion)(uint32_t scanline,
                                                 parng_level_of_detail lod,
+                                                int32_t indexed,
                                                 parng_scanlines_for_rgba_conversion *scanlines,
                                                 void *user_data);
 

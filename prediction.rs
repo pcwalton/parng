@@ -387,9 +387,9 @@ impl Predictor {
                            width: u32,
                            color_depth: u8,
                            stride: u8) {
-        debug_assert!(((dest.as_ptr() as usize) & 0xf) == 0);
-        debug_assert!(((src.as_ptr() as usize) & 0xf) == 0);
-        debug_assert!(((prev.as_ptr() as usize) & 0xf) == 0);
+        debug_assert!(slice_is_properly_aligned(dest));
+        debug_assert!(slice_is_properly_aligned(src));
+        debug_assert!(slice_is_properly_aligned(prev));
         debug_assert!([8, 16, 24, 32].contains(&color_depth));
 
         let accelerated_implementation = match (self, color_depth, stride) {
@@ -522,8 +522,14 @@ fn slice_is_properly_aligned(buffer: &[u8]) -> bool {
         address_is_properly_aligned(buffer.len())
 }
 
+#[cfg(target_arch="x86_64")]
 fn address_is_properly_aligned(address: usize) -> bool {
     (address & 0xf) == 0
+}
+
+#[cfg(target_arch="arm")]
+fn address_is_properly_aligned(address: usize) -> bool {
+    true
 }
 
 #[link(name="parngacceleration")]

@@ -31,7 +31,7 @@
 #define length r3
 #define stride r4
 
-.section text
+.text
 
 @ Helper functions to factor out the unsafe memory accesses in one place follow.
 

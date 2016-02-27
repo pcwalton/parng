@@ -41,6 +41,25 @@ especially suitable for client software:
 
   - `parng` has a scalar fallback for systems that do not support AVX or NEON.
 
+## Building
+
+`parng` is a standard Rust package built using Cargo. After installing Rust, use
+`cargo build --release` to build the package. Inside `target/release` you can find both the Rust
+library and a C library.
+
+## Usage
+
+`parng` has two APIs: the simple API and the image loader API. The simple API is in the `simple`
+module and consists of the `Image` structure and its associated `load` method. It is useful if all
+you need to do is to decode the image into memory. If you need more fine-grained control—for
+example, if you want to display the image as it is loading, or you want to downscale individual
+scanlines as you decode them to save memory—then you will want to use the `ImageLoader` API. That
+API can be found in `imageloader.rs`.
+
+The C API mirrors the Rust API. When called from C, `parng` has two additional convenience methods:
+`parng_image_load_from_file` and `parng_image_load_from_memory`. These APIs allow you to load
+PNGs from C `FILE *` or byte arrays respectively with one function call.
+
 ## License
 
 `parng` is licensed under the same terms as Rust itself. See the `LICENSE-APACHE` and

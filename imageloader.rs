@@ -142,7 +142,10 @@ impl ImageLoader {
                     if &chunk_header.chunk_type == b"IDAT" {
                         self.decode_state = DecodeState::DecodingData(chunk_header.length);
                     } else if &chunk_header.chunk_type == b"IEND" {
-                        if !self.transparency.is_none() {
+                        if self.metadata
+                               .as_ref()
+                               .expect("No metadata before `IEND`?!")
+                               .color_depth != 32 {
                             self.send_scanlines_to_predictor_thread_to_convert_to_rgba()
                         }
 
@@ -189,8 +192,10 @@ impl ImageLoader {
                         (metadata.dimensions.width, metadata.color_depth)
                     };
                     let bytes_per_pixel = (color_depth / 8) as u32;
-                    let stride = width * bytes_per_pixel * bytes_per_pixel /
-                        InterlacingInfo::new(0, color_depth, self.current_lod).stride as u32;
+                    let stride =
+                        InterlacingInfo::new(0,
+                                             color_depth,
+                                             self.current_lod).scanline_stride(width, color_depth);
 
                     // Wait for the predictor thread to catch up if necessary.
                     let scanlines_to_buffer = self.scanlines_to_buffer();
@@ -283,9 +288,9 @@ impl ImageLoader {
                                          .expect("No metadata?!")
                                          .dimensions
                                          .height;
-                        let y_scale_factor = InterlacingInfo::y_scale_factor(self.current_lod);
-                        if self.current_y == height / y_scale_factor &&
-                                !self.finished_entropy_decoding() {
+                        let height_of_lod = InterlacingInfo::height_of_lod(height,
+                                                                           self.current_lod);
+                        if self.current_y == height_of_lod && !self.finished_entropy_decoding() {
                             self.current_y = 0;
                             if let LevelOfDetail::Adam7(ref mut current_lod) = self.current_lod {
                                 if *current_lod < 6 {
@@ -425,13 +430,18 @@ impl ImageLoader {
 
     #[inline(never)]
     fn send_scanlines_to_predictor_thread_to_convert_to_rgba(&mut self) {
-        let rgb_palette = mem::replace(&mut self.palette, vec![]);
         let transparency = mem::replace(&mut self.transparency, Transparency::None);
-        let (dimensions, color_depth, interlaced) = {
+        let (dimensions, color_depth, interlaced, indexed) = {
             let metadata = self.metadata.as_ref().expect("No metadata?!");
             (metadata.dimensions,
              metadata.color_depth,
-             metadata.interlace_method != InterlaceMethod::Disabled)
+             metadata.interlace_method != InterlaceMethod::Disabled,
+             metadata.color_type == ColorType::Indexed)
+        };
+        let rgb_palette = if indexed {
+            Some(mem::replace(&mut self.palette, vec![]))
+        } else {
+            None
         };
         self.predictor_thread_comm
             .sender
@@ -632,10 +642,14 @@ pub trait DataProvider : Send {
 
     /// Called when `parng` needs to perform RGBA conversion for a scanline.
     ///
-    /// `lod` specifies the level of detail, if the image is interlaced.
+    /// `lod` specifies the level of detail, if the image is interlaced. `indexed` is true if the
+    /// image has indexed color.
     ///
     /// This method will be called only if the image is not RGBA.
-    fn fetch_scanlines_for_rgba_conversion<'a>(&'a mut self, scanline: u32, lod: LevelOfDetail)
+    fn fetch_scanlines_for_rgba_conversion<'a>(&'a mut self,
+                                               scanline: u32,
+                                               lod: LevelOfDetail,
+                                               indexed: bool)
                                                -> ScanlinesForRgbaConversion<'a>;
 
     /// Called when `parng` has finished RGBA conversion for a scanline, optionally at a specific
@@ -679,21 +693,22 @@ pub struct ScanlinesForRgbaConversion<'a> {
     /// optimum alignment, use the `align()` function.
     pub rgba_scanline: &'a mut [u8],
 
-    /// The pixels of the indexed scanline. There must be 1 byte per pixel available in this array.
+    /// The pixels of the indexed scanline, if applicable. There must be 1 byte per pixel available
+    /// in this array.
     ///
     /// It is recommended that the address of this slice be aligned properly. To determine the
     /// optimum alignment, use the `align()` function.
-    pub indexed_scanline: &'a [u8],
+    pub indexed_scanline: Option<&'a [u8]>,
 
     /// The number of bytes between individiual pixels in `rgba_scanline`. This must be at least 4.
     ///
     /// This field is useful for in-place deinterlacing.
     pub rgba_stride: u8,
 
-    /// The number of bytes between individiual pixels in `indexed_scanline`.
+    /// The number of bytes between individual pixels in `indexed_scanline`.
     ///
     /// This field is useful for in-place deinterlacing.
-    pub indexed_stride: u8,
+    pub indexed_stride: Option<u8>,
 }
 
 pub trait UninitializedExtension {
@@ -746,23 +761,35 @@ impl InterlacingInfo {
     /// `color_depth` specifies the number of bits per pixel. Thus, if you have for instance an
     /// RGBA image, you supply 32 here. For indexed images, supply 8.
     pub fn new(y: u32, color_depth: u8, lod: LevelOfDetail) -> InterlacingInfo {
+        let y_offset = InterlacingInfo::y_offset(lod);
         let y_scale_factor = InterlacingInfo::y_scale_factor(lod);
         let color_depth = color_depth / 8;
-        let (y_offset, stride, x_offset) = match lod {
-            LevelOfDetail::None => (0, 1, 0),
-            LevelOfDetail::Adam7(0) => (0, 8, 0),
-            LevelOfDetail::Adam7(1) => (0, 8, 4),
-            LevelOfDetail::Adam7(2) => (4, 4, 0),
-            LevelOfDetail::Adam7(3) => (0, 4, 2),
-            LevelOfDetail::Adam7(4) => (2, 2, 0),
-            LevelOfDetail::Adam7(5) => (0, 2, 1),
-            LevelOfDetail::Adam7(6) => (1, 1, 0),
+        let (stride, x_offset) = match lod {
+            LevelOfDetail::None => (1, 0),
+            LevelOfDetail::Adam7(0) => (8, 0),
+            LevelOfDetail::Adam7(1) => (8, 4),
+            LevelOfDetail::Adam7(2) => (4, 0),
+            LevelOfDetail::Adam7(3) => (4, 2),
+            LevelOfDetail::Adam7(4) => (2, 0),
+            LevelOfDetail::Adam7(5) => (2, 1),
+            LevelOfDetail::Adam7(6) => (1, 0),
             LevelOfDetail::Adam7(_) => panic!("Unsupported Adam7 level of detail!"),
         };
         InterlacingInfo {
-            y: y * y_scale_factor + y_offset,
+            y: y * y_scale_factor + y_offset as u32,
             stride: stride * color_depth,
             offset: x_offset * color_depth,
+        }
+    }
+
+    fn y_offset(lod: LevelOfDetail) -> u8 {
+        match lod {
+            LevelOfDetail::None | LevelOfDetail::Adam7(0) | LevelOfDetail::Adam7(1) |
+            LevelOfDetail::Adam7(3) | LevelOfDetail::Adam7(5) => 0,
+            LevelOfDetail::Adam7(6) => 1,
+            LevelOfDetail::Adam7(4) => 2,
+            LevelOfDetail::Adam7(2) => 4,
+            LevelOfDetail::Adam7(_) => panic!("Unsupported Adam7 level of detail!"),
         }
     }
 
@@ -774,6 +801,26 @@ impl InterlacingInfo {
             LevelOfDetail::Adam7(5) | LevelOfDetail::Adam7(6) => 2,
             LevelOfDetail::Adam7(_) => panic!("Unsupported Adam7 level of detail!"),
         }
+    }
+
+    // This formula is cribbed from `stb_image`.
+    pub fn scanline_width(&self, image_width: u32, color_depth: u8) -> u32 {
+        let bytes_per_pixel = color_depth / 8;
+        let x_offset = self.offset / bytes_per_pixel;
+        let x_scale_factor = self.stride / bytes_per_pixel;
+        (image_width - x_offset as u32 + x_scale_factor as u32 - 1) / x_scale_factor as u32
+    }
+
+    fn scanline_stride(&self, image_width: u32, color_depth: u8) -> u32 {
+        let bytes_per_pixel = color_depth / 8;
+        self.scanline_width(image_width, color_depth) * bytes_per_pixel as u32
+    }
+
+    // This formula is cribbed from `stb_image`.
+    fn height_of_lod(image_height: u32, lod: LevelOfDetail) -> u32 {
+        let y_offset = InterlacingInfo::y_offset(lod);
+        let y_scale_factor = InterlacingInfo::y_scale_factor(lod);
+        (image_height - y_offset as u32 + y_scale_factor as u32 - 1) / y_scale_factor as u32
     }
 }
 

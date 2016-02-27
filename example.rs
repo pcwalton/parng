@@ -24,7 +24,7 @@ fn main() {
     let out_path = args.next().unwrap_or_else(|| usage());
 
     let before = time::precise_time_ns();
-    let image = Image::load(&mut File::open(in_path).unwrap()).unwrap();
+    let image = Image::load(&mut File::open(&in_path).unwrap()).unwrap();
     let elapsed = time::precise_time_ns() - before;
     println!("Elapsed time: {}ms", elapsed as f32 / 1_000_000.0);
 

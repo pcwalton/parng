@@ -213,6 +213,7 @@ pub struct parng_data_provider {
     fetch_scanlines_for_rgba_conversion:
         extern "C" fn(scanline: u32,
                       lod: parng_level_of_detail,
+                      indexed: i32,
                       scanlines: *mut parng_scanlines_for_rgba_conversion,
                       user_data: *mut c_void),
     rgba_conversion_complete_for_scanline: extern "C" fn(scanline: u32,
@@ -264,7 +265,10 @@ impl DataProvider for parng_data_provider {
         (self.prediction_complete_for_scanline)(scanline, c_lod, self.user_data);
     }
 
-    fn fetch_scanlines_for_rgba_conversion<'a>(&'a mut self, scanline: u32, lod: LevelOfDetail)
+    fn fetch_scanlines_for_rgba_conversion<'a>(&'a mut self,
+                                               scanline: u32,
+                                               lod: LevelOfDetail,
+                                               indexed: bool)
                                                -> ScanlinesForRgbaConversion<'a> {
        unsafe {
            let mut c_scanlines_for_rgba_conversion = parng_scanlines_for_rgba_conversion {
@@ -276,8 +280,14 @@ impl DataProvider for parng_data_provider {
                indexed_stride: 0,
            };
            let c_lod = level_of_detail_to_c_level_of_detail(lod);
+           let c_indexed = if indexed {
+               1
+           } else {
+               0
+           };
            (self.fetch_scanlines_for_rgba_conversion)(scanline,
                                                       c_lod,
+                                                      c_indexed,
                                                       &mut c_scanlines_for_rgba_conversion,
                                                       self.user_data);
            c_scanlines_for_rgba_conversion_to_scanlines_for_rgba_conversion(
@@ -496,11 +506,18 @@ unsafe fn c_scanlines_for_rgba_conversion_to_scanlines_for_rgba_conversion(
         rgba_scanline: slice::from_raw_parts_mut(
                            (*c_scanlines_for_rgba_conversion).rgba_scanline,
                            (*c_scanlines_for_rgba_conversion).rgba_scanline_length),
-        indexed_scanline: slice::from_raw_parts(
-            (*c_scanlines_for_rgba_conversion).indexed_scanline,
-            (*c_scanlines_for_rgba_conversion).indexed_scanline_length),
+        indexed_scanline: if (*c_scanlines_for_rgba_conversion).indexed_scanline.is_null() {
+            None
+        } else {
+            Some(slice::from_raw_parts((*c_scanlines_for_rgba_conversion).indexed_scanline,
+                                       (*c_scanlines_for_rgba_conversion).indexed_scanline_length))
+        },
         rgba_stride: (*c_scanlines_for_rgba_conversion).rgba_stride,
-        indexed_stride: (*c_scanlines_for_rgba_conversion).indexed_stride,
+        indexed_stride: if (*c_scanlines_for_rgba_conversion).indexed_scanline.is_null() {
+            None
+        } else {
+            Some((*c_scanlines_for_rgba_conversion).indexed_stride)
+        },
     }
 }
 

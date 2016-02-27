@@ -3,8 +3,8 @@
 // Copyright (c) 2016 Mozilla Foundation
 
 use PngError;
-use imageloader::{DataProvider, LevelOfDetail, ScanlinesForPrediction, ScanlinesForRgbaConversion};
-use imageloader::{Transparency};
+use imageloader::{DataProvider, InterlacingInfo, LevelOfDetail, ScanlinesForPrediction};
+use imageloader::{ScanlinesForRgbaConversion, Transparency};
 use std::iter;
 use std::mem;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -39,7 +39,7 @@ pub struct PredictionRequest {
 }
 
 pub struct PerformRgbaConversionRequest {
-    pub rgb_palette: Vec<u8>,
+    pub rgb_palette: Option<Vec<u8>>,
     pub transparency: Transparency,
     pub width: u32,
     pub height: u32,
@@ -167,17 +167,6 @@ fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
                                               stride);
                         }
 
-                        if !indexed_color {
-                            convert_grayscale_to_rgba(&mut prev[0..dest_width_in_bytes],
-                                                      &palette,
-                                                      color_depth);
-                            if scanline_y == height - 1 {
-                                convert_grayscale_to_rgba(&mut dest[0..dest_width_in_bytes],
-                                                          &palette,
-                                                          color_depth);
-                            }
-                        }
-
                         sender.send(PredictorThreadToMainThreadMsg::ScanlinePredictionComplete(
                                 scanline_y,
                                 scanline_lod,
@@ -196,7 +185,7 @@ fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
                     width,
                     height,
                     color_depth,
-                    interlaced
+                    interlaced,
             }) => {
                 let data_provider = match data_provider {
                     None => {
@@ -210,6 +199,7 @@ fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
                 } else {
                     &ADAM7_LEVELS_OF_DETAIL[..]
                 };
+                let indexed = rgb_palette.is_some();
 
                 for lod in levels_of_detail {
                     for scanline_y in 0..height {
@@ -220,16 +210,42 @@ fn predictor_thread(sender: Sender<PredictorThreadToMainThreadMsg>,
                                 rgba_stride: dest_stride,
                                 indexed_stride: src_stride,
                             } = data_provider.fetch_scanlines_for_rgba_conversion(scanline_y,
-                                                                                  *lod);
-                            let dest_line_stride = (dest_stride as usize) * (width as usize);
-                            let src_line_stride = (src_stride as usize) * (width as usize);
-                            convert_indexed_to_rgba(&mut dest[0..dest_line_stride],
-                                                    &src[0..src_line_stride],
-                                                    &rgb_palette[..],
-                                                    &transparency,
-                                                    color_depth,
-                                                    dest_stride,
-                                                    src_stride);
+                                                                                  *lod,
+                                                                                  indexed);
+                            let scanline_width =
+                                InterlacingInfo::new(scanline_y,
+                                                     color_depth,
+                                                     *lod).scanline_width(width,
+                                                                          color_depth) as usize;
+                            let dest_line_stride = (dest_stride as usize) * scanline_width;
+                            let src_line_stride = src_stride.map(|src_stride| {
+                                (src_stride as usize) * scanline_width
+                            });
+                            match (&rgb_palette, color_depth) {
+                                (&Some(ref rgb_palette), _) => {
+                                    let src_line_stride = src_line_stride.unwrap();
+                                    convert_indexed_to_rgba(&mut dest[0..dest_line_stride],
+                                                            &src.as_ref()
+                                                                .unwrap()[0..src_line_stride],
+                                                            &rgb_palette[..],
+                                                            &transparency,
+                                                            color_depth,
+                                                            dest_stride,
+                                                            src_stride.unwrap())
+                                }
+                                (&None, 24) => {
+                                    convert_rgb_to_rgba(&mut dest[0..dest_line_stride],
+                                                        &transparency)
+                                }
+                                (&None, 16) => {
+                                    convert_grayscale_alpha_to_rgba(&mut dest[0..dest_line_stride])
+                                }
+                                (&None, 8) => {
+                                    convert_8bpp_grayscale_to_rgba(&mut dest[0..dest_line_stride],
+                                                                   &transparency)
+                                }
+                                (&None, _) => panic!("Unsupported color depth!"),
+                            }
                         }
 
                         data_provider.rgba_conversion_complete_for_scanline(scanline_y, *lod);
@@ -282,6 +298,9 @@ impl Predictor {
                     for (dest, src) in dest.iter_mut().take(4).zip(src.iter()) {
                         *dest = *src
                     }
+                    for dest in &mut dest[color_depth..] {
+                        *dest = 0xff
+                    }
                 }
             }
             Predictor::Left => {
@@ -292,6 +311,9 @@ impl Predictor {
                         *a = src.wrapping_add(*a);
                         *dest = *a
                     }
+                    for dest in &mut dest[color_depth..] {
+                        *dest = 0xff
+                    }
                 }
             }
             Predictor::Up => {
@@ -301,6 +323,9 @@ impl Predictor {
                                                 .take(4)
                                                 .zip(src.iter().zip(b.iter().take(4))) {
                         *dest = src.wrapping_add(*b)
+                    }
+                    for dest in &mut dest[color_depth..] {
+                        *dest = 0xff
                     }
                 }
             }
@@ -313,6 +338,9 @@ impl Predictor {
                                 .zip(src.iter().zip(b.iter().take(4).zip(a.iter_mut()))) {
                         *a = src.wrapping_add((((*a as u16) + (*b as u16)) / 2) as u8);
                         *dest = *a
+                    }
+                    for dest in &mut dest[color_depth..] {
+                        *dest = 0xff
                     }
                 }
             }
@@ -328,6 +356,9 @@ impl Predictor {
                         *a = src.wrapping_add(paeth);
                         *c = *b;
                         *dest = *a;
+                    }
+                    for dest in &mut dest[color_depth..] {
+                        *dest = 0xff
                     }
                 }
             }
@@ -411,16 +442,6 @@ impl Predictor {
     }
 }
 
-fn convert_grayscale_to_rgba(scanline: &mut [u8], palette: &Option<Vec<u8>>, color_depth: u8) {
-    // TODO(pcwalton): Support 1bpp, 2bpp, and 4bpp grayscale.
-    match color_depth {
-        32 | 24 => {}
-        16 => convert_grayscale_alpha_to_rgba(scanline),
-        8 => convert_8bpp_grayscale_to_rgba(scanline),
-        _ => panic!("convert_to_rgba: Unsupported color depth!"),
-    }
-}
-
 /// TODO(pcwalton): Agner says latency is going down for `vpgatherdd`. I don't have a Skylake to
 /// test on, but maybe it's worth using that instruction on that model and later?
 fn convert_indexed_to_rgba(dest: &mut [u8],
@@ -451,8 +472,27 @@ fn convert_indexed_to_rgba(dest: &mut [u8],
     }
 }
 
+/// TODO(pcwalton): Use SIMD for this.
+#[inline(never)]
+fn convert_rgb_to_rgba(scanline: &mut [u8], transparency: &Transparency) {
+    match *transparency {
+        Transparency::None => {}
+        Transparency::MagicColor(r, g, b) => {
+            for color in scanline.chunks_mut(4) {
+                color[3] = if color[0] == r && color[1] == g && color[2] == b {
+                    0
+                } else {
+                    0xff
+                };
+            }
+        }
+        Transparency::Indexed(_) => panic!("Can't have indexed transparency in an RGB image!"),
+    };
+}
+
 /// TODO(pcwalton): Use SIMD for this. Greyscale images are pretty rare, so it's not a priority,
 /// but it would be nice.
+#[inline(never)]
 fn convert_grayscale_alpha_to_rgba(scanline: &mut [u8]) {
     for color in scanline.chunks_mut(4) {
         let (y, a) = (color[0], color[1]);
@@ -463,12 +503,17 @@ fn convert_grayscale_alpha_to_rgba(scanline: &mut [u8]) {
 }
 
 /// TODO(pcwalton): Use SIMD for this too.
-fn convert_8bpp_grayscale_to_rgba(scanline: &mut [u8]) {
+#[inline(never)]
+fn convert_8bpp_grayscale_to_rgba(scanline: &mut [u8], transparency: &Transparency) {
     for color in scanline.chunks_mut(4) {
         let y = color[0];
         color[1] = y;
         color[2] = y;
-        color[3] = y
+        color[3] = y;
+        match *transparency {
+            Transparency::MagicColor(r, g, b) if r == y && g == y && b == y => color[4] = 0,
+            _ => {}
+        }
     }
 }
 

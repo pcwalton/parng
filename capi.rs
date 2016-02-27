@@ -9,7 +9,7 @@
 use PngError;
 use imageloader::{self, DataProvider, ImageLoader, InterlacingInfo, LevelOfDetail, LoadProgress};
 use imageloader::{ScanlinesForPrediction, ScanlinesForRgbaConversion};
-use libc::{self, FILE, SEEK_CUR, SEEK_END, SEEK_SET, c_void, size_t, uintptr_t};
+use libc::{self, FILE, SEEK_CUR, SEEK_END, SEEK_SET, c_long, c_void, size_t, uintptr_t};
 use metadata::{ColorType, InterlaceMethod, Metadata};
 use simple::Image;
 use std::io::{self, Cursor, Error, ErrorKind, Read, Seek, SeekFrom};
@@ -160,7 +160,7 @@ impl Seek for FileReader {
             SeekFrom::Current(offset) => (offset as i64, SEEK_CUR),
         };
         unsafe {
-            let new_offset = libc::fseek(self.file, offset, whence);
+            let new_offset = libc::fseek(self.file, offset as c_long, whence);
             Ok(new_offset as u64)
         }
     }
